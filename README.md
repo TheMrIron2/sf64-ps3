@@ -18,8 +18,13 @@ Add `n64ps3` under `extern/`:
 git submodule add https://github.com/TheMrIron2/n64ps3 extern/n64ps3
 ```
 
-This repository keeps `extern/n64ps3` out of tree until you add it. Host and PS3
-builds fail clearly when it is absent.
+For a fresh checkout after the submodule has been added:
+
+```sh
+git submodule update --init extern/n64ps3
+```
+
+Host and PS3 builds fail clearly when `extern/n64ps3` is absent.
 
 ## Host Smoke
 

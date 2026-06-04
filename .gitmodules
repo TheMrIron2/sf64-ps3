@@ -1,0 +1,3 @@
+[submodule "extern/n64ps3"]
+	path = extern/n64ps3
+	url = https://github.com/TheMrIron2/n64ps3

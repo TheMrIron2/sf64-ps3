@@ -15,4 +15,10 @@ Add `n64ps3` with:
 git submodule add https://github.com/TheMrIron2/n64ps3 extern/n64ps3
 ```
 
+After cloning this repository, initialize the existing submodule with:
+
+```sh
+git submodule update --init extern/n64ps3
+```
+
 Do not vendor ROMs, generated assets, or copyrighted game data here.

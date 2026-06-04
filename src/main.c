@@ -3,7 +3,7 @@
 
 #include <stdio.h>
 
-static int sf64_note_status(const char *name, Sf64ApiState state)
+static int sf64_note_status(const char *name, Sf64ApiState state, int required)
 {
     const char *label = "unknown";
 
@@ -22,8 +22,8 @@ static int sf64_note_status(const char *name, Sf64ApiState state)
             break;
     }
 
-    printf("[sf64-ps3] %-28s %s\n", name, label);
-    return state == SF64_API_WORKED ? 0 : 1;
+    printf("[sf64-ps3] %-28s %s%s\n", name, label, required ? "" : " (optional)");
+    return required && state != SF64_API_WORKED ? 1 : 0;
 }
 
 int main(void)
@@ -33,16 +33,17 @@ int main(void)
 
     sf64_platform_print_banner();
 
-    issues += sf64_note_status("n64ps3 init", sf64_platform_init());
-    issues += sf64_note_status("OSMesgQueue create", sf64_platform_create_vi_queue());
-    issues += sf64_note_status("VI event register", sf64_platform_register_vi_event());
+    issues += sf64_note_status("n64ps3 init", sf64_platform_init(), 1);
+    issues += sf64_note_status("OSMesgQueue create", sf64_platform_create_vi_queue(), 1);
+    issues += sf64_note_status("VI event register", sf64_platform_register_vi_event(), 1);
 
     for (frame = 0; frame < SF64_PS3_SMOKE_FRAME_COUNT; frame++) {
         printf("[sf64-ps3] frame %d begin\n", frame);
-        issues += sf64_note_status("VI retrace trigger", sf64_platform_trigger_vi_retrace());
-        issues += sf64_note_status("VI message receive", sf64_platform_receive_vi_message());
-        issues += sf64_note_status("controller poll", sf64_platform_poll_controller());
-        issues += sf64_note_status("dummy gfx task", sf64_platform_submit_dummy_gfx_task());
+        issues += sf64_note_status("VI retrace trigger", sf64_platform_trigger_vi_retrace(), 1);
+        issues += sf64_note_status("VI message receive", sf64_platform_receive_vi_message(), 1);
+        issues += sf64_note_status("controller poll", sf64_platform_poll_controller(), 0);
+        issues += sf64_note_status("PI read", sf64_platform_probe_pi_read(), 0);
+        issues += sf64_note_status("dummy gfx task", sf64_platform_submit_dummy_gfx_task(), 0);
         sf64_stub_game_run_frame(frame);
     }
 

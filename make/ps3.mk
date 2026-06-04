@@ -1,14 +1,21 @@
 include make/common.mk
 
+N64PS3_PS3_MK := $(N64PS3_DIR)/make/n64ps3_ps3.mk
+ifneq ($(wildcard $(N64PS3_PS3_MK)),)
+include $(N64PS3_DIR)/make/n64ps3_ps3.mk
+endif
+
 PS3_BUILD_DIR := $(BUILD_ROOT)/ps3
 PS3_TARGET_ELF := $(PS3_BUILD_DIR)/$(SF64_PS3_TARGET).elf
 PS3_OBJECTS := $(patsubst src/%.c,$(PS3_BUILD_DIR)/%.o,$(SF64_COMMON_C_FILES))
+
+PS3_N64PS3_OBJECTS := $(patsubst $(N64PS3_DIR)/%.c,$(PS3_BUILD_DIR)/n64ps3/%.o,$(N64PS3_C_FILES))
 
 PPU_CC ?= $(PS3DEV)/ppu/bin/ppu-gcc
 
 PS3_CPPFLAGS := \
 	$(addprefix -I,$(SF64_INCLUDE_DIRS)) \
-	-I$(N64PS3_DIR)/include \
+	$(N64PS3_PS3_CPPFLAGS) \
 	-I$(PSL1GHT)/include \
 	-DSF64_PS3_TARGET=1
 
@@ -51,10 +58,19 @@ check-n64ps3:
 		printf '%s\n' "n64ps3 is not buildable/consumable by this PS3 smoke target yet."; \
 		exit 2; \
 	fi
+	@if [ ! -f "$(N64PS3_PS3_MK)" ]; then \
+		printf '%s\n' "error: $(N64PS3_PS3_MK) is missing."; \
+		printf '%s\n' "update extern/n64ps3 to a revision with Makefile exports."; \
+		exit 2; \
+	fi
 
-$(PS3_TARGET_ELF): $(PS3_OBJECTS)
+$(PS3_TARGET_ELF): $(PS3_OBJECTS) $(PS3_N64PS3_OBJECTS)
 	$(PPU_CC) $(PS3_LDFLAGS) -o $@ $^ $(N64PS3_PS3_LDLIBS) $(PS3_LDLIBS)
 
 $(PS3_BUILD_DIR)/%.o: src/%.c
+	@mkdir -p $(dir $@)
+	$(PPU_CC) $(PS3_CPPFLAGS) $(PS3_CFLAGS) -c -o $@ $<
+
+$(PS3_BUILD_DIR)/n64ps3/%.o: $(N64PS3_DIR)/%.c
 	@mkdir -p $(dir $@)
 	$(PPU_CC) $(PS3_CPPFLAGS) $(PS3_CFLAGS) -c -o $@ $<
