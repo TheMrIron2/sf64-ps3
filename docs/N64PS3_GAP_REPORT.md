@@ -19,6 +19,21 @@ This report tracks what the `sf64-ps3` smoke skeleton can prove against
   built `build/ps3/sf64_ps3_smoke.elf` through
   `extern/n64ps3/make/n64ps3_ps3.mk`. SELF/PKG packaging is intentionally not
   faked.
+- VI duplicate-delivery regression check: fixed in `extern/n64ps3` by making
+  `n64ps3_vi_raise_retrace_for_host` deliver through `OS_EVENT_VI` only. The
+  updated `n64ps3` `vi_retrace` sample proves one host retrace yields exactly
+  one queue message.
+
+## Latest Verification
+
+- `n64ps3 make host`: not run because `extern/n64ps3` has no root Makefile or
+  `host` target.
+- `n64ps3 vi_retrace` sample: passed via existing CMake sample build in
+  `/tmp/n64ps3-vi-test`; output included `vi_retrace=1`.
+- `sf64-ps3 make host`: passed.
+- `sf64-ps3 ./build/host/sf64_ps3_smoke`: passed with exit `0`; it now fails if
+  one retrace leaves a duplicate VI message in the queue.
+- `sf64-ps3 make ps3`: passed and built `build/ps3/sf64_ps3_smoke.elf`.
 
 ## Make Fragments Used
 
@@ -50,6 +65,13 @@ with `-Os`, so the initial PS3 smoke default remains `-O0`.
 - `n64ps3_pi_read_rom`, present but optional smoke fails without a mounted ROM
 - `n64ps3_rdpnull_renderer`, indirectly through runtime init
 
+## Fixed Semantic Issues
+
+- Duplicate VI retrace delivery: `osViSetEvent` registers the VI event binding
+  with `osSetEventMesg`, and `n64ps3_vi_raise_retrace_for_host` now raises only
+  `OS_EVENT_VI` after retrace-count gating. It no longer sends directly to the
+  VI queue and then raises the OS event.
+
 ## Missing APIs
 
 - TODO(n64ps3): `osJamMesg`.
@@ -63,8 +85,9 @@ with `-Os`, so the initial PS3 smoke default remains `-O0`.
 
 - `osSendMesg` and `osRecvMesg` exist, but currently ignore `OS_MESG_BLOCK`.
   Empty blocking receives return immediately with failure instead of blocking.
-- VI event delivery works in host smoke through `n64ps3_vi_raise_retrace_for_host`,
-  but this is still a host helper rather than a real 50/60 Hz backend tick.
+- VI event delivery works in host smoke through `n64ps3_vi_raise_retrace_for_host`
+  with exactly one message per retrace, but this is still a host helper rather
+  than a real 50/60 Hz backend tick.
 - `n64ps3_pad_read` exists and returns a zeroed controller state, but it does not
   yet prove PS3 controller plumbing or libultra-compatible controller status.
 - `n64ps3_pi_read_rom` exists, but the current smoke has no ROM and needs a

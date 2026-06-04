@@ -63,6 +63,7 @@ Sf64ApiState sf64_platform_trigger_vi_retrace(void)
 Sf64ApiState sf64_platform_receive_vi_message(void)
 {
     OSMesg msg = 0;
+    OSMesg duplicate = 0;
 
     if (!s_queue_created) {
         return SF64_API_FAILED;
@@ -74,6 +75,11 @@ Sf64ApiState sf64_platform_receive_vi_message(void)
 
     if (msg != SF64_PS3_VI_MESSAGE_VALUE) {
         printf("[sf64-ps3] VI message payload mismatch\n");
+        return SF64_API_FAILED;
+    }
+
+    if (osRecvMesg(&s_vi_queue, &duplicate, OS_MESG_NOBLOCK) == 0) {
+        printf("[sf64-ps3] duplicate VI message received for one retrace\n");
         return SF64_API_FAILED;
     }
 
