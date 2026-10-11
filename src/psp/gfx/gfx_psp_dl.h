@@ -75,6 +75,30 @@ typedef struct {
 
 int PspGfxDl_Run(const Gfx* dl, u32 taskIndex, PspGfxDlStats* outStats);
 
+#if PSP_GFX_BACKEND_GU
+enum {
+    MESH_REJECT_STATE, MESH_REJECT_FOG, MESH_REJECT_TRACE, MESH_REJECT_CACHE,
+    MESH_REJECT_BOUNDS, MESH_REJECT_MATERIALS, MESH_REJECT_ALLOCATE, MESH_REJECT_REASONS
+};
+typedef struct {
+    u32 hits, fallbacks, spans, vertices, restored, skipped;
+    u32 triangles, loaded, unregistered, rejects[MESH_REJECT_REASONS];
+} PspGfxDlRetainedStats;
+typedef char PspGfxDlRetainedStatsSizeCheck[sizeof(PspGfxDlRetainedStats) == 64 ? 1 : -1];
+void PspGfxDl_GetRetainedStats(PspGfxDlRetainedStats* stats);
+#endif
+
+#if PSP_NATIVE_COVERAGE_AB
+typedef struct {
+    u32 mode;
+    u32 calls;
+    u32 commands;
+} PspGfxDlNativeCoverageStats;
+
+void PspGfxDl_ToggleNativeCoverage(void);
+void PspGfxDl_GetNativeCoverageStats(PspGfxDlNativeCoverageStats* stats);
+#endif
+
 #if PSP_RENDERER_DIAGNOSTICS
 int PspGfxDl_TracePollControls(u32 rawButtons);
 #else

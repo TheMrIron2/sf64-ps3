@@ -25,6 +25,7 @@ endif
 PSP_RENDERER_C_FILES := \
     src/psp/display.c \
     src/psp/gfx/gfx_psp_color.c \
+    src/psp/gfx/gfx_psp_seams.c \
     src/psp/gfx/gfx_psp_dl.c \
     src/psp/renderer_starfield.c \
     src/psp/renderer_bridge.c
@@ -38,6 +39,7 @@ PSP_RENDERER_C_FILES += \
 else ifeq ($(PSP_GFX_BACKEND),gu)
 PSP_RENDERER_C_FILES += \
     src/psp/gfx/gfx_psp_backend_gu.c \
+    src/psp/gfx/gfx_psp_retained_sources.c \
     src/psp/gfx/gfx_psp_device_gu.c \
     src/psp/gfx/gfx_psp_gu_device.c \
     src/psp/gfx/gfx_psp_gu_texture.c

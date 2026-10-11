@@ -6,6 +6,7 @@
 #include "sf64thread.h"
 #include "src/psp/gfx/gfx_psp_backend.h"
 #include "src/psp/gfx/gfx_psp_color.h"
+#include "src/psp/gfx/gfx_psp_seams.h"
 #include "src/psp/display.h"
 #include "src/psp/hw_counter_profile.h"
 #include "src/psp/platform.h"
@@ -2318,62 +2319,10 @@ static void psp_gfx_dl_handle_movemem(PspGfxDlContext* ctx, const Gfx* gfx) {
     }
 }
 
-/*
- * Backdrop seam weld. The sky panorama (Background_DrawBackdrop) draws the
- * same backdrop DL twice, at x-translations differing by exactly one
- * panorama period; the two instances' abutting edge vertices are
- * mathematically equal but reach the GE through different float expressions
- * (edge = +x*m00 + t1 vs -x*m00 + t2), which differ by ~1 ulp (~1/16 px on
- * screen). The N64 RSP quantizes all screen coordinates to s13.2
- * quarter-pixels, welding such edges shut; the PSP GE rasterizes full
- * floats and leaves a one-pixel unpainted column at the seam (the Corneria
- * intro's vertical streak: background fill color showing through the sky).
- * Weld: in small, flat (constant view-z), non-pretransformed batches --
- * the backdrop wrap pair's signature -- snap any vertex within ~1/8 px
- * screen tolerance of an earlier vertex onto that vertex. UVs are left
- * alone (each strip keeps sampling its own edge texel).
- */
+// Weld nearby seams only in flat background batches without depth
 static void psp_gfx_dl_weld_flat_batch_seams(PspGfxDlContext* ctx) {
-    float minZ;
-    float maxZ;
-    float eps;
-    u32 i;
-    u32 j;
-
-    if (ctx->batchPretransformed || (ctx->batchCount < 12) || (ctx->batchCount > 48)) {
-        return;
-    }
-    minZ = maxZ = PSP_GFX_DL_BATCH[0].z;
-    for (i = 1; i < ctx->batchCount; i++) {
-        float z = PSP_GFX_DL_BATCH[i].z;
-
-        if (z < minZ) {
-            minZ = z;
-        }
-        if (z > maxZ) {
-            maxZ = z;
-        }
-    }
-    /* Flat and in front of the eye only (view z < 0, constant across batch). */
-    if ((maxZ >= 0.0f) || ((maxZ - minZ) > (0.001f * -minZ))) {
-        return;
-    }
-    /* ~1/8 pixel at this depth: dx_view = (1/8)/240 ndc * |z| / P00(=1.811). */
-    eps = 3.0e-4f * -minZ;
-    for (i = 1; i < ctx->batchCount; i++) {
-        PspGfxVertex* b = &PSP_GFX_DL_BATCH[i];
-
-        for (j = 0; j < i; j++) {
-            const PspGfxVertex* a = &PSP_GFX_DL_BATCH[j];
-            float dx = b->x - a->x;
-            float dy = b->y - a->y;
-
-            if (((dx != 0.0f) || (dy != 0.0f)) && (dx < eps) && (dx > -eps) && (dy < eps) && (dy > -eps)) {
-                b->x = a->x;
-                b->y = a->y;
-                break;
-            }
-        }
+    if (!ctx->batchPretransformed && !(ctx->batchDepthTest | ctx->batchDepthWrite)) {
+        PspGfx_WeldFlatVertices(PSP_GFX_DL_BATCH, ctx->batchCount);
     }
 }
 
@@ -5515,12 +5464,8 @@ static void psp_gfx_dl_note_fog_transform_sample(PspGfxDlContext* ctx, const Vtx
 }
 #endif
 
-static void psp_gfx_dl_handle_vtx(PspGfxDlContext* ctx, const Gfx* gfx) {
-    const Vtx* src = (const Vtx*) psp_gfx_dl_resolve_ptr(ctx, gfx->words.w1);
-    u32 w0 = gfx->words.w0;
-    u32 count;
+static void psp_gfx_dl_load_vertices(PspGfxDlContext* ctx, const Vtx* src, u32 count, s32 v0) {
     u32 projectionSnapshot;
-    s32 v0;
     u32 i;
     u64 phaseStartUs;
     const n64psp_directional_lightf* lightingLights;
@@ -5532,11 +5477,8 @@ static void psp_gfx_dl_handle_vtx(PspGfxDlContext* ctx, const Gfx* gfx) {
         return;
     }
 
-    count = (w0 >> 10) & 0x3F;
-    v0 = (s32) ((w0 >> 17) & 0x7F);
-
     if ((count == 0) || (v0 < 0) || (((u32) v0 + count) > PSP_GFX_DL_MAX_VERTICES)) {
-        psp_gfx_dl_count_unsupported(ctx, psp_gfx_dl_opcode(gfx));
+        psp_gfx_dl_count_unsupported(ctx, PSP_GFX_OP_F3D_VTX);
         return;
     }
 
@@ -5762,6 +5704,11 @@ static void psp_gfx_dl_handle_vtx(PspGfxDlContext* ctx, const Gfx* gfx) {
     PspHwCounterProfile_InnerScopeEnd(PSP_HW_SCOPE_VERTEX);
 }
 
+static void psp_gfx_dl_handle_vtx(PspGfxDlContext* ctx, const Gfx* gfx) {
+    psp_gfx_dl_load_vertices(ctx, psp_gfx_dl_resolve_ptr(ctx, gfx->words.w1),
+                            (gfx->words.w0 >> 10) & 0x3F, (gfx->words.w0 >> 17) & 0x7F);
+}
+
 static void psp_gfx_dl_handle_move_word(PspGfxDlContext* ctx, const Gfx* gfx) {
     u32 offset = (gfx->words.w0 >> 8) & 0xFFFF;
     u32 index = gfx->words.w0 & 0xFF;
@@ -5868,14 +5815,14 @@ static void psp_gfx_dl_handle_texture(PspGfxDlContext* ctx, const Gfx* gfx) {
     psp_gfx_dl_mark_effective_material_dirty(ctx);
 }
 
-static void psp_gfx_dl_handle_set_texture_image(PspGfxDlContext* ctx, const Gfx* gfx) {
+static void psp_gfx_dl_set_texture_image(PspGfxDlContext* ctx, const void* image, u32 format, u32 size) {
     u32 oldFormat = ctx->textureFormat;
     u32 oldSize = ctx->textureSize;
     int oldTrainingBackdrop = psp_gfx_dl_is_training_backdrop_texture(ctx->textureImage);
 
-    ctx->textureFormat = (gfx->words.w0 >> 21) & 0x7;
-    ctx->textureSize = (gfx->words.w0 >> 19) & 0x3;
-    ctx->textureImage = psp_gfx_dl_resolve_ptr(ctx, gfx->words.w1);
+    ctx->textureFormat = format;
+    ctx->textureSize = size;
+    ctx->textureImage = image;
     ctx->texture = PspGfxTextureHandle_Null();
     ctx->textureUploadWidth = 0;
     ctx->textureUploadHeight = 0;
@@ -5888,6 +5835,11 @@ static void psp_gfx_dl_handle_set_texture_image(PspGfxDlContext* ctx, const Gfx*
         (oldTrainingBackdrop != psp_gfx_dl_is_training_backdrop_texture(ctx->textureImage))) {
         psp_gfx_dl_mark_material_classification_dirty(ctx);
     }
+}
+
+static void psp_gfx_dl_handle_set_texture_image(PspGfxDlContext* ctx, const Gfx* gfx) {
+    psp_gfx_dl_set_texture_image(ctx, psp_gfx_dl_resolve_ptr(ctx, gfx->words.w1),
+                                (gfx->words.w0 >> 21) & 0x7, (gfx->words.w0 >> 19) & 0x3);
 }
 
 static void psp_gfx_dl_handle_set_color_image(PspGfxDlContext* ctx, const Gfx* gfx) {
@@ -5910,36 +5862,46 @@ static void psp_gfx_dl_handle_load_tlut(PspGfxDlContext* ctx) {
     }
 }
 
-static void psp_gfx_dl_handle_set_tile(PspGfxDlContext* ctx, const Gfx* gfx) {
-    u32 tile = (gfx->words.w1 >> 24) & 0x7;
+static void psp_gfx_dl_set_render_tile(PspGfxDlContext* ctx, u32 format, u32 size, u32 palette,
+                                      u32 cmt, u32 maskT, u32 cms, u32 maskS, u32 shiftT, u32 shiftS) {
     int oldMirrorS = ((ctx->textureCms & G_TX_MIRROR) != 0) && (ctx->textureMaskS != G_TX_NOMASK);
     int oldMirrorT = ((ctx->textureCmt & G_TX_MIRROR) != 0) && (ctx->textureMaskT != G_TX_NOMASK);
     u32 oldFormat = ctx->textureFormat;
     u32 oldSize = ctx->textureSize;
 
-    if (tile != G_TX_RENDERTILE) {
-        return;
-    }
-
-    ctx->textureFormat = (gfx->words.w0 >> 21) & 0x7;
-    ctx->textureSize = (gfx->words.w0 >> 19) & 0x3;
-    ctx->texturePaletteIndex = (gfx->words.w1 >> 20) & 0xF;
-    ctx->textureCmt = (gfx->words.w1 >> 18) & 0x3;
-    ctx->textureMaskT = (gfx->words.w1 >> 14) & 0xF;
-    ctx->textureCms = (gfx->words.w1 >> 8) & 0x3;
-    ctx->textureMaskS = (gfx->words.w1 >> 4) & 0xF;
+    ctx->textureFormat = format;
+    ctx->textureSize = size;
+    ctx->texturePaletteIndex = palette;
+    ctx->textureCmt = cmt;
+    ctx->textureMaskT = maskT;
+    ctx->textureCms = cms;
+    ctx->textureMaskS = maskS;
     if ((oldMirrorS != (((ctx->textureCms & G_TX_MIRROR) != 0) && (ctx->textureMaskS != G_TX_NOMASK))) ||
         (oldMirrorT != (((ctx->textureCmt & G_TX_MIRROR) != 0) && (ctx->textureMaskT != G_TX_NOMASK)))) {
         ctx->texture = PspGfxTextureHandle_Null();
     }
 #if PSP_RENDERER_DIAGNOSTICS
-    ctx->textureShiftT = (gfx->words.w1 >> 10) & 0xF;
-    ctx->textureShiftS = gfx->words.w1 & 0xF;
+    ctx->textureShiftT = shiftT;
+    ctx->textureShiftS = shiftS;
+#else
+    (void) shiftT;
+    (void) shiftS;
 #endif
     ctx->textureUploadAttempted = 0;
     psp_gfx_dl_mark_effective_material_dirty(ctx);
     if ((oldFormat != ctx->textureFormat) || (oldSize != ctx->textureSize)) {
         psp_gfx_dl_mark_material_classification_dirty(ctx);
+    }
+}
+
+static void psp_gfx_dl_handle_set_tile(PspGfxDlContext* ctx, const Gfx* gfx) {
+    u32 w0 = gfx->words.w0;
+    u32 w1 = gfx->words.w1;
+
+    if (((w1 >> 24) & 0x7) == G_TX_RENDERTILE) {
+        psp_gfx_dl_set_render_tile(ctx, (w0 >> 21) & 0x7, (w0 >> 19) & 0x3, (w1 >> 20) & 0xF,
+                                   (w1 >> 18) & 0x3, (w1 >> 14) & 0xF, (w1 >> 8) & 0x3,
+                                   (w1 >> 4) & 0xF, (w1 >> 10) & 0xF, w1 & 0xF);
     }
 }
 
@@ -6102,21 +6064,7 @@ static int psp_gfx_dl_prepare_texture(PspGfxDlContext* ctx, int premultiply) {
     return result;
 }
 
-static void psp_gfx_dl_handle_set_tile_size(PspGfxDlContext* ctx, const Gfx* gfx) {
-    u32 tile = (gfx->words.w1 >> 24) & 0x7;
-    u32 uls;
-    u32 ult;
-    u32 lrs;
-    u32 lrt;
-
-    if (tile != G_TX_RENDERTILE) {
-        return;
-    }
-
-    uls = (gfx->words.w0 >> 12) & 0xFFF;
-    ult = gfx->words.w0 & 0xFFF;
-    lrs = (gfx->words.w1 >> 12) & 0xFFF;
-    lrt = gfx->words.w1 & 0xFFF;
+static void psp_gfx_dl_set_render_tile_size(PspGfxDlContext* ctx, u32 uls, u32 ult, u32 lrs, u32 lrt) {
     ctx->textureTileUls = uls;
     ctx->textureTileUlt = ult;
     /*
@@ -6135,6 +6083,16 @@ static void psp_gfx_dl_handle_set_tile_size(PspGfxDlContext* ctx, const Gfx* gfx
     // Resolve textures when geometry consumes them after pending material changes
     psp_gfx_dl_mark_effective_material_dirty(ctx);
 }
+
+static void psp_gfx_dl_handle_set_tile_size(PspGfxDlContext* ctx, const Gfx* gfx) {
+    if (((gfx->words.w1 >> 24) & 0x7) == G_TX_RENDERTILE) {
+        psp_gfx_dl_set_render_tile_size(ctx, (gfx->words.w0 >> 12) & 0xFFF, gfx->words.w0 & 0xFFF,
+                                        (gfx->words.w1 >> 12) & 0xFFF, gfx->words.w1 & 0xFFF);
+    }
+}
+
+#include "src/psp/gfx/gfx_psp_native_assets.inc.c"
+#include "src/psp/gfx/gfx_psp_retained_mesh.inc.c"
 
 static void psp_gfx_dl_set_hud_anchor(const Gfx* param) {
     PspGfxBackend_SetHudAnchor((s16) (param->words.w1 >> 16), (s16) param->words.w1);
@@ -6484,7 +6442,20 @@ static int psp_gfx_dl_run_internal(PspGfxDlContext* ctx, const Gfx* dl, u32 dept
                 ctx->waterDlDepth = 1;
             }
 #endif
-            psp_gfx_dl_run_internal(ctx, child, depth + 1);
+#if PSP_GFX_BACKEND_GU
+            sRetainedContinuations[depth] = noPush ? NULL : (const n64psp_mesh_command*) pc;
+            sRetainedCallerLevels |= 1u << depth;
+            if (!psp_gfx_dl_retained_dispatch(ctx, child, depth + 1)) {
+#endif
+            if ((child == aVenomFighter1DL) && psp_gfx_dl_native_fighter_eligible(ctx, depth + 1)) {
+                psp_gfx_dl_native_fighter_run(ctx, depth + 1);
+            } else if (!psp_gfx_dl_native_leaf_dispatch(ctx, child, depth + 1)) {
+                psp_gfx_dl_run_internal(ctx, child, depth + 1);
+            }
+#if PSP_GFX_BACKEND_GU
+            }
+            sRetainedCallerLevels &= ~(1u << depth);
+#endif
 #if PROFILE_HW_COUNTERS
             if (waterStartUs != 0 && waterTile <= PSP_WATER_TILE_COUNT) {
                 ctx->waterDlDepth = 0;
@@ -7002,7 +6973,13 @@ int PspGfxDl_Run(const Gfx* dl, u32 taskIndex, PspGfxDlStats* outStats) {
     char line[768];
 #endif
 
+#if PSP_NATIVE_COVERAGE_AB
+    psp_gfx_dl_native_coverage_begin();
+#endif
     PspGfxColor_Init();
+#if PSP_GFX_BACKEND_GU
+    PspGfxRetainedSource_Prepare();
+#endif
     psp_gfx_dl_reset_context(ctx);
     ctx->taskIndex = taskIndex;
 #if PSP_RENDERER_DIAGNOSTICS
