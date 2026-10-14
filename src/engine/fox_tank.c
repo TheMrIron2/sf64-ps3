@@ -521,9 +521,6 @@ void func_tank_80044868(Player* player) {
     }
     if (player->baseSpeed > 10.0f) {
         Lib_Texture_Scroll(aLandmasterTrackChainTex, 32, 32, 0);
-        if ((gCurrentLevel == LEVEL_TITANIA) && !gBossActive) {
-            func_tank_80043280(aLandmasterModelTex4, aTiLandmasterWheelTex, gGameFrameCount * -55.0f);
-        }
     }
 
     Player_DamageEffects(player);
