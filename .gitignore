@@ -32,7 +32,6 @@ m2cfiles/
 TempComp.bin.mio0
 torch.hash.yml
 *.code-workspace
-AGENTS.md
 .DS_Store
 docs/codex/*
 /tests
