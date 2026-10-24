@@ -15,7 +15,7 @@ const unsigned char* volatile gPspScratchpadTargets[3] = {
     PspScratchpad_Original0, PspScratchpad_Original1, PspScratchpad_Original2
 };
 static unsigned sImage[PSP_SCRATCHPAD_STORAGE / 4] __attribute__((aligned(64)));
-static int sReady, sLocked, sOwner, sInitialized;
+static int sReady, sLocked, sOwner, sInitialized, sInstalled;
 static void scratchpad_end(void);
 
 static void scratchpad_originals(void) {
@@ -45,6 +45,7 @@ static void scratchpad_init(void) {
     unsigned i;
     scratchpad_originals();
     sReady = 0;
+    sInstalled = 0;
     memset(sImage, 0xa5, sizeof(sImage));
     for (i = 0; i < 3; i++) {
         const ScratchpadCode* code = &sScratchpadCode[i];
@@ -77,7 +78,7 @@ static void scratchpad_begin(void) {
 
     // The GU renderer owns this range and can repair it only before entering copied code
     for (i = 0; i < sizeof(sImage) / 4; i++) if (PSP_SCRATCHPAD_UNCACHED[i] != sImage[i]) break;
-    if (i != sizeof(sImage) / 4) {
+    if (!sInstalled || i != sizeof(sImage) / 4) {
         sceKernelDcacheWritebackInvalidateRange(PSP_SCRATCHPAD_ADDRESS, sizeof(sImage));
         for (i = 0; i < sizeof(sImage) / 4; i++) PSP_SCRATCHPAD_UNCACHED[i] = sImage[i];
         __sync_synchronize();
@@ -90,8 +91,10 @@ static void scratchpad_begin(void) {
                 return;
             }
         }
+        // Establish instruction visibility on first ownership and after every repair
+        sceKernelIcacheInvalidateRange(PSP_SCRATCHPAD_ADDRESS, sizeof(sImage));
+        sInstalled = 1;
     }
-    sceKernelIcacheInvalidateRange(PSP_SCRATCHPAD_ADDRESS, sizeof(sImage));
     for (i = 0; i < 3; i++) gPspScratchpadTargets[i] = PSP_SCRATCHPAD_ADDRESS + sScratchpadCode[i].offset;
     __sync_synchronize();
 }
