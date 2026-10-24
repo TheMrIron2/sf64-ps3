@@ -438,6 +438,8 @@ endif
 endif
 
 PSP_LINK_FLAG = -Wl,-q,-T$(PSP_LINK_SCRIPT)
+PSP_GFX_GU_SCRATCHPAD := $(if $(PSP_LAYOUT_DEPS),1,0)
+CFLAGS += -DPSP_GFX_GU_SCRATCHPAD=$(PSP_GFX_GU_SCRATCHPAD)
 LDFLAGS += -specs=$(PSPSDK)/lib/prxspecs \
            $(PSP_LINK_FLAG) \
            $(PSPSDK)/lib/prxexports.o
@@ -661,6 +663,9 @@ ifneq ($(PSP_LAYOUT_DEPS),)
 	$(PYTHON) $(PSP_LAYOUT_TOOL) --plan $(PSP_LAYOUT_PLAN) --verify-elf $@
 endif
 	$(PYTHON) src/psp/gfx/native_asset_compile.py $(NATIVE_COVERAGE_ARGS) --build-dir $(BUILD_DIR) --verify-elf $@
+ifeq ($(PSP_GFX_GU_SCRATCHPAD),1)
+	$(PYTHON) src/psp/gfx/scratchpad_code.py verify $(BUILD_DIR)
+endif
 
 $(PSP_MAP): $(PSP_ELF)
 	@test -f $@
@@ -748,6 +753,10 @@ clean:
 	$(RM) -r $(BUILD_DIR) build/psp-bootstrap
 ifneq ($(wildcard $(N64PSP_DIR)/Makefile),)
 	$(MAKE) -C $(N64PSP_DIR) clean
+endif
+
+ifeq ($(PSP_GFX_GU_SCRATCHPAD),1)
+include src/psp/gfx/scratchpad.mk
 endif
 
 print-%:
