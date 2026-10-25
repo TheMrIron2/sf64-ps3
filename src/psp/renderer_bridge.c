@@ -63,13 +63,11 @@ static int psp_renderer_draw_overlays(int menuFrame) {
     }
 #if PSP_FPS_OVERLAY
     if (perf && sPerfReady) {
-        if (menu) PspOverlay_Rect(0, 0, 480, 8, 0xD8000000);
-        snprintf(text, sizeof(text), "FPS %lu.%lu SIM %lu.%lu GFX %lu.%lu/%lu.%lums CAP %u SKIP %lu",
+        int width = snprintf(text, sizeof(text), "FPS %lu.%lu GFX %lu.%lu/%lu.%lums",
                  (unsigned long)(sPerfFpsTenths / 10), (unsigned long)(sPerfFpsTenths % 10),
-                 (unsigned long)(sPerfSimulationTenths / 10), (unsigned long)(sPerfSimulationTenths % 10),
                  (unsigned long)(sPerfGfxMsTenths / 10), (unsigned long)(sPerfGfxMsTenths % 10),
-                 (unsigned long)(sPerfGfxPeakTenths / 10), (unsigned long)(sPerfGfxPeakTenths % 10),
-                 (unsigned)(60 / PspFrameScheduler_GetPresentationVIs()), (unsigned long)sPerfSkipped);
+                 (unsigned long)(sPerfGfxPeakTenths / 10), (unsigned long)(sPerfGfxPeakTenths % 10));
+        PspOverlay_Rect(0, 0, width * 6, 8, 0xFF000000);
         PspOverlay_Text(0, 0, 0xFFFFFFFF, text);
     }
 #endif
