@@ -35,17 +35,17 @@ void Map_LevelSelect(void) {
     s32 nextPlanetId;
     OSContPad* contPress = &gControllerPress[gMainController];
 
-    if (contPress->button & L_JPAD) {
+    if (contPress->button & L_CBUTTONS) {
         sLevelSelectMission--;
         if (sLevelSelectMission < 0) {
             sLevelSelectMission = 6;
         }
-    } else if (contPress->button & R_JPAD) {
+    } else if (contPress->button & R_CBUTTONS) {
         sLevelSelectMission++;
         if (sLevelSelectMission > 6) {
             sLevelSelectMission = 0;
         }
-    } else if ((contPress->button & U_JPAD) && (sLevelSelectMission != 0)) {
+    } else if ((contPress->button & U_CBUTTONS) && (sLevelSelectMission != 0)) {
         sLevelSelectDifficulty++;
         if (sLevelSelectDifficulty > 2) {
             sLevelSelectDifficulty = 0;
@@ -54,7 +54,7 @@ void Map_LevelSelect(void) {
             ((sLevelSelectMission == 1) || (sLevelSelectMission == 5) || (sLevelSelectMission == 6))) {
             sLevelSelectDifficulty = 2;
         }
-    } else if ((contPress->button & D_JPAD) && (sLevelSelectMission != 0)) {
+    } else if ((contPress->button & D_CBUTTONS) && (sLevelSelectMission != 0)) {
         sLevelSelectDifficulty--;
         if ((sLevelSelectDifficulty != 2) &&
             ((sLevelSelectMission == 1) || (sLevelSelectMission == 5) || (sLevelSelectMission == 6))) {
