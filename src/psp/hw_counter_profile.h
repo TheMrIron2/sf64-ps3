@@ -64,7 +64,14 @@ typedef enum {
 
 void PspHwCounterProfile_Init(void);
 void PspHwCounterProfile_Shutdown(void);
-int PspHwCounterProfile_PollControls(u32 rawButtons);
+void PspHwCounterProfile_Service(void);
+int PspHwCounterProfile_NeedsService(void);
+void PspHwCounterProfile_StartCapture(void);
+void PspHwCounterProfile_StopCapture(void);
+int PspHwCounterProfile_IsBusy(void);
+const char* PspHwCounterProfile_GetScene(void);
+void PspHwCounterProfile_CycleScene(int direction);
+const char* PspHwCounterProfile_GetStatus(void);
 void PspHwCounterProfile_FrameBegin(void);
 void PspHwCounterProfile_FrameEnd(u32 commands, u32 loadedVertices, u32 submittedVertices);
 void PspHwCounterProfile_ScopeBegin(PspHwCounterScope scope);
@@ -84,13 +91,12 @@ void PspHwCounterProfile_CountWaterGroupSeen(void);
 void PspHwCounterProfile_CountWaterGroupEvaluated(void);
 void PspHwCounterProfile_CountWaterGroupSkipped(u32 pairs, u32 commands);
 int PspHwCounterProfile_IsCapturingTask(void);
-void PspHwCounterProfile_DrawStatus(void);
 
 #else
 
 #define PspHwCounterProfile_Init() ((void) 0)
 #define PspHwCounterProfile_Shutdown() ((void) 0)
-#define PspHwCounterProfile_PollControls(rawButtons) (0)
+#define PspHwCounterProfile_Service() ((void) 0)
 #define PspHwCounterProfile_FrameBegin() ((void) 0)
 #define PspHwCounterProfile_FrameEnd(commands, loadedVertices, submittedVertices) ((void) 0)
 #define PspHwCounterProfile_ScopeBegin(scope) ((void) 0)
@@ -109,7 +115,6 @@ void PspHwCounterProfile_DrawStatus(void);
 #define PspHwCounterProfile_CountWaterGroupEvaluated() ((void) 0)
 #define PspHwCounterProfile_CountWaterGroupSkipped(pairs, commands) ((void) 0)
 #define PspHwCounterProfile_IsCapturingTask() (0)
-#define PspHwCounterProfile_DrawStatus() ((void) 0)
 
 #endif
 

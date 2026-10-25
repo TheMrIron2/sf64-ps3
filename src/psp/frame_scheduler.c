@@ -6,8 +6,10 @@ u8 PspFrameScheduler_GetPresentationVIs(void) {
     return sPresentationVIs;
 }
 
-void PspFrameScheduler_TogglePresentationRate(void) {
-    sPresentationVIs = 3 - sPresentationVIs;
+void PspFrameScheduler_SetPresentationHz(int hz) {
+    if (hz == 30 || hz == 60) {
+        sPresentationVIs = (hz == 60) ? 1 : 2;
+    }
 }
 
 static u8 psp_frame_scheduler_clamp_vis(u8 vis) {

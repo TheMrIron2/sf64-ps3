@@ -364,3 +364,10 @@ int PspGfxGuDevice_GetTextureEdramArena(void** base, u32* bytes) {
     *bytes = sTextureEdramBytes;
     return (sTextureEdramBase != NULL) && (sTextureEdramBytes != 0);
 }
+
+int PspGfxGuDevice_CanAppendOverlay(u32 bytes) {
+    int used;
+    if (!sReady || !sFrameActive) return 0;
+    used = sceGuCheckList();
+    return used >= 0 && (u32)used <= sizeof(sGuList) && bytes <= sizeof(sGuList) - (u32)used;
+}

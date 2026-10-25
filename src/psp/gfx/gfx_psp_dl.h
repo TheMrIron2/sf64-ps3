@@ -100,9 +100,11 @@ void PspGfxDl_GetNativeCoverageStats(PspGfxDlNativeCoverageStats* stats);
 #endif
 
 #if PSP_RENDERER_DIAGNOSTICS
-int PspGfxDl_TracePollControls(u32 rawButtons);
+void PspGfxDl_TraceRequest(void);
+int PspGfxDl_TracePending(void);
 #else
-#define PspGfxDl_TracePollControls(rawButtons) (0)
+#define PspGfxDl_TraceRequest() ((void) 0)
+#define PspGfxDl_TracePending() (0)
 #endif
 
 #if PROFILE_HW_COUNTERS

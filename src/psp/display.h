@@ -10,7 +10,6 @@ int PspDisplay_IsWidescreen(void);
 float PspDisplay_GetUiScaleY(void);
 float PspDisplay_UiFromLeft(float x);
 int PspDisplay_IsUiScalingEnabled(void);
-void PspDisplay_ToggleUiScaling(void);
-void PspDisplay_CycleMode(void);
+int PspDisplay_SetMode(int mode);
 
 #endif

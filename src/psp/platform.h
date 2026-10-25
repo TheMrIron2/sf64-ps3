@@ -34,6 +34,7 @@ void PspPlatform_SetEventMesg(OSEvent event, OSMesgQueue* mq, OSMesg msg);
 void PspPlatform_SetViEvent(OSMesgQueue* mq, OSMesg msg, u32 retraceCount);
 u32 PspPlatform_GetViCount(void);
 void PspPlatform_RequestExit(void);
+void PspPlatform_ExitGame(void);
 void PspPlatform_AcknowledgeViEvent(void);
 
 #endif

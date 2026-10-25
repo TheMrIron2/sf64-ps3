@@ -66,7 +66,6 @@ static u8 psp_gfx_dl_present_fog_alpha(u8 alpha) {
 
 #if PSP_RENDERER_DIAGNOSTICS
 #include "assets/ast_map.h"
-#include <pspctrl.h>
 
 extern Gfx gMapVenomCloudRuntimeDL[];
 #endif
@@ -548,8 +547,6 @@ static PspGfxDlContext sPspGfxDlContext;
 
 #if PSP_RENDERER_DIAGNOSTICS
 static volatile int sPspGfxDlTraceArmed;
-static u32 sPspGfxDlTracePreviousButtons;
-static int sPspGfxDlTraceHintLogged;
 
 // SF64 material corpus capture; measures how finite the effective material set is
 // Storage is file static so it accumulates across tasks rather than per-task reset
@@ -6911,17 +6908,12 @@ static void psp_gfx_dl_pool_lookup_report(u32 taskIndex) {
 #endif
 
 #if PSP_RENDERER_DIAGNOSTICS
-int PspGfxDl_TracePollControls(u32 rawButtons) {
-    const u32 combo = PSP_CTRL_SELECT | PSP_CTRL_TRIANGLE;
-    int pressed = ((rawButtons & combo) == combo) && ((sPspGfxDlTracePreviousButtons & combo) != combo);
-    int consumed = (rawButtons & combo) == combo;
+void PspGfxDl_TraceRequest(void) {
+    sPspGfxDlTraceArmed = 1;
+}
 
-    sPspGfxDlTracePreviousButtons = rawButtons;
-    if (pressed) {
-        sPspGfxDlTraceArmed = 1;
-        PspPlatform_LogLine("[rdp-trace] armed next graphics task");
-    }
-    return consumed;
+int PspGfxDl_TracePending(void) {
+    return sPspGfxDlTraceArmed;
 }
 #endif
 
@@ -6983,10 +6975,6 @@ int PspGfxDl_Run(const Gfx* dl, u32 taskIndex, PspGfxDlStats* outStats) {
     psp_gfx_dl_reset_context(ctx);
     ctx->taskIndex = taskIndex;
 #if PSP_RENDERER_DIAGNOSTICS
-    if (!sPspGfxDlTraceHintLogged) {
-        PspPlatform_LogLine("[rdp-trace] press SELECT+TRIANGLE to capture the next graphics task");
-        sPspGfxDlTraceHintLogged = 1;
-    }
     if (sPspGfxDlTraceArmed) {
         ctx->traceActive = 1;
         sPspGfxDlTraceArmed = 0;

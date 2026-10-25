@@ -24,6 +24,9 @@ endif
 # src/psp/renderer.c and its private helpers are legacy/reference code only.
 PSP_RENDERER_C_FILES := \
     src/psp/display.c \
+    src/psp/settings.c \
+    src/psp/menu.c \
+    src/psp/overlay.c \
     src/psp/gfx/gfx_psp_color.c \
     src/psp/gfx/gfx_psp_seams.c \
     src/psp/gfx/gfx_psp_dl.c \
@@ -38,6 +41,7 @@ PSP_RENDERER_C_FILES += \
     src/psp/gfx/gfx_pspgl_device.c
 else ifeq ($(PSP_GFX_BACKEND),gu)
 PSP_RENDERER_C_FILES += \
+    src/psp/overlay_gu.c \
     src/psp/gfx/gfx_psp_backend_gu.c \
     src/psp/gfx/gfx_psp_retained_sources.c \
     src/psp/gfx/gfx_psp_device_gu.c \

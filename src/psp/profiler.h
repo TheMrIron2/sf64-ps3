@@ -154,13 +154,14 @@ typedef enum {
 #endif
 
 void PspProfiler_Init(void);
-int PspProfiler_PollControls(u32 rawButtons);
+void PspProfiler_Service(void);
+int PspProfiler_NeedsService(void);
+const char* PspProfiler_GetStatus(void);
 void PspProfiler_StartCapture(void);
 void PspProfiler_StopCapture(void);
 void PspProfiler_DumpCapture(void);
 int PspProfiler_IsCapturing(void);
 void PspProfiler_Shutdown(void);
-void PspProfiler_DrawStatus(void);
 void PspProfiler_RequestExit(void);
 int PspProfiler_ExitRequested(void);
 

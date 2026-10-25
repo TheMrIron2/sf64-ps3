@@ -27,7 +27,6 @@ int exit_callback(int arg1, int arg2, void* common) {
 
 #ifdef PSP_FULL
     PspProfiler_RequestExit();
-    PspPlatform_RequestExit();
 #else
     sceKernelExitGame();
 #endif
@@ -74,11 +73,9 @@ int main(int argc, char* argv[]) {
 #ifdef PSP_FULL
     pspDebugScreenPrintf("Star Fox 64\n");
     pspDebugScreenPrintf("Booting native game loop...\n\n");
-    pspDebugScreenPrintf("Select+Start exits\n");
-    pspDebugScreenPrintf("Select+L starts profile, Select+R saves\n");
-#if PROFILE_HW_COUNTERS
-    pspDebugScreenPrintf("Select+Left/Right selects the capture scene\n");
-    pspDebugScreenPrintf("Counters need PSPLINK profmode t; else timings only\n");
+    pspDebugScreenPrintf("SELECT opens settings   HOME opens system menu\n");
+#if PROFILE_GPROF || PROFILE_PHASES || PROFILE_HW_COUNTERS
+    pspDebugScreenPrintf("Hold D-pad Up+L to capture, Up+R to save\n");
 #endif
 
 #if PSP_AUDIO

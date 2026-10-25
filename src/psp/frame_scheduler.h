@@ -21,7 +21,7 @@ typedef struct {
 } PspFrameSchedule;
 
 u8 PspFrameScheduler_GetPresentationVIs(void);
-void PspFrameScheduler_TogglePresentationRate(void);
+void PspFrameScheduler_SetPresentationHz(int hz);
 
 void PspFrameScheduler_Init(PspFrameScheduler* scheduler, u32 currentVi, u8 simulationVIs, u8 presentationVIs);
 PspFrameSchedule PspFrameScheduler_Advance(PspFrameScheduler* scheduler, u32 currentVi);

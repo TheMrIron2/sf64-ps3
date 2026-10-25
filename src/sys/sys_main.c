@@ -5,6 +5,8 @@
 #include "global.h"
 #include "src/psp/frame_interpolation.h"
 #include "src/psp/frame_scheduler.h"
+#include "src/psp/input.h"
+#include "src/psp/menu.h"
 #include "src/psp/platform.h"
 #include "src/psp/profiler.h"
 #include "src/psp/renderer.h"
@@ -352,6 +354,7 @@ static SPTask* Graphics_BuildSimulationTask(u32 simulationVi) {
     PspFrameInterpolation_BeginSimulationFrame(gGfxTask, simulationVi, gVIsPerFrame,
                                                Graphics_InterpolationEligible());
     MQ_WAIT_FOR_MESG(&gControllerMesgQueue, NULL);
+    PspInput_FilterGameInput(sNextController);
     Controller_UpdateInput();
     osSendMesg(&gSerialThreadMesgQueue, (OSMesg) SI_READ_CONTROLLER, OS_MESG_NOBLOCK);
     if (gControllerPress[3].button & U_JPAD) {
@@ -402,6 +405,12 @@ static void Graphics_RunPspScheduler(SPTask* reusableTask, FrameBuffer* reusable
         PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_VBLANK_WAIT);
         MQ_WAIT_FOR_MESG(&gGfxVImesgQueue, NULL);
         PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_VBLANK_WAIT);
+        if (PspProfiler_ExitRequested()) {
+            Graphics_WaitForTask(&taskInFlight);
+            PspPlatform_ExitGame();
+            return;
+        }
+        PspInput_Update();
         currentVi = PspPlatform_GetViCount();
         schedule = PspFrameScheduler_Advance(&scheduler, currentVi);
         simulationTicks = 0;
@@ -412,6 +421,14 @@ static void Graphics_RunPspScheduler(SPTask* reusableTask, FrameBuffer* reusable
             u32 simulationDeadlineVi;
             u32 simulationTick;
 
+            if (PspMenu_NeedsBoundary()) {
+                Graphics_WaitForTask(&taskInFlight);
+                inFlightTask = NULL;
+                inFlightDependency = NULL;
+                PspMenu_Apply();
+                currentVi = PspPlatform_GetViCount();
+                PspFrameScheduler_SetPresentationVIs(&scheduler, currentVi, Graphics_GetPresentationVIs());
+            }
             simulationTicks = MIN(schedule.missedSimulationDeadlines + 1, PSP_MAX_SIMULATION_TICKS_PER_WAKE);
             simulationDeadlineVi =
                 schedule.simulationDeadlineVi - ((simulationTicks - 1) * scheduler.simulationVIs);
@@ -434,6 +451,8 @@ static void Graphics_RunPspScheduler(SPTask* reusableTask, FrameBuffer* reusable
             PspFrameScheduler_SetSimulationVIs(&scheduler, currentVi, gVIsPerFrame);
             PspFrameScheduler_SetPresentationVIs(&scheduler, currentVi, Graphics_GetPresentationVIs());
         }
+
+        PspMenu_Publish();
 
         if (schedule.presentationDue) {
             SPTask* task;

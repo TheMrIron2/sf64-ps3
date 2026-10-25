@@ -2,10 +2,10 @@
 
 #include "src/psp/display.h"
 #include "src/psp/gfx/gfx_psp_backend.h"
-#include "src/psp/platform.h"
 
 static int sReady;
-static int sUiScalingEnabled;
+// Preserve the pinned getter while keeping the accepted UI layout fixed
+int gPspUiScalingEnabled;
 static n64psp_display_config sDisplayConfig;
 
 int PspDisplay_Init(void) {
@@ -40,33 +40,22 @@ float PspDisplay_UiFromLeft(float x) {
 }
 
 int PspDisplay_IsUiScalingEnabled(void) {
-    return sUiScalingEnabled;
+    return gPspUiScalingEnabled;
 }
 
-void PspDisplay_ToggleUiScaling(void) {
-    sUiScalingEnabled = !sUiScalingEnabled;
-    PspGfxBackend_ReplayCacheInvalidate();
-    PspPlatform_LogLine(sUiScalingEnabled ? "[psp-display] UI scaling on" : "[psp-display] UI scaling off");
-}
-
-void PspDisplay_CycleMode(void) {
-    n64psp_display_mode mode;
-
+int PspDisplay_SetMode(int mode) {
+    if (mode < 0 || mode >= N64PSP_DISPLAY_PSP_MODE_COUNT) {
+        return 0;
+    }
     if (!sReady && !PspDisplay_Init()) {
-        return;
+        return 0;
     }
-
-    mode = (n64psp_display_mode) ((sDisplayConfig.mode + 1) % N64PSP_DISPLAY_PSP_MODE_COUNT);
+    if (sDisplayConfig.mode == mode) {
+        return 0;
+    }
     if (!n64psp_display_configure(&sDisplayConfig, mode)) {
-        return;
+        return 0;
     }
     PspGfxBackend_ReplayCacheInvalidate();
-
-    if (mode == N64PSP_DISPLAY_PSP_320X240) {
-        PspPlatform_LogLine("[psp-display] original 320x240");
-    } else if (mode == N64PSP_DISPLAY_PSP_362X272) {
-        PspPlatform_LogLine("[psp-display] 4:3 362x272");
-    } else {
-        PspPlatform_LogLine("[psp-display] widescreen 480x272");
-    }
+    return 1;
 }

@@ -992,3 +992,18 @@ Corneria examined 121/56 and Venom 234/94. All 436 Title addresses stayed
 unchanged during its capture, while 94–96% of repeated gameplay addresses changed
 at least once. Measure same-task reuse before adding a cache; the current totals
 combine visits across frames and do not identify identical continuation stacks.
+
+## Settings overlay boundaries
+
+Keep controller polling on the simulation scheduler thread and publish bounded
+snapshots to the serial and render threads. Apply display changes only after the
+active graphics task completes and before generating the next simulation task;
+reset interpolation history and invalidate HUD replay together. Append GU menu
+sprites after the scene flushes and before the normal Submit. Closed-menu CPU
+performance text needs the completed back buffer before swapping; PSPGL overlays
+belong in the pending draw stream. Capture file writes run after graphics
+completion on the scheduler thread. Cached host raster timings cannot price
+uncached PSP VRAM blending: the owner observed a large slowdown with the CPU
+menu, so menu rectangles and antialiased text now use GPU sprites and immutable
+RAM font textures. The owner confirmed the performance fix on a physical PSP
+with the GU backend.

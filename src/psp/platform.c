@@ -10,6 +10,7 @@
 #endif
 #include "src/psp/audio_output.h"
 #include "src/psp/input.h"
+#include "src/psp/hw_counter_profile.h"
 #include "src/psp/platform.h"
 #include "src/psp/profiler.h"
 #include "src/psp/renderer.h"
@@ -34,8 +35,6 @@ SceUID sceIoOpen(const char* file, int flags, SceMode mode);
 int sceIoWrite(SceUID fd, const void* data, SceSize size);
 int sceIoClose(SceUID fd);
 int sceIoRemove(const char* file);
-void pspDebugScreenSetXY(int x, int y);
-void pspDebugScreenPrintf(const char* fmt, ...);
 float sqrtf(float x);
 
 #define PSP_LOG_PATH_MS0 "ms0:/sf64_psp.log"
@@ -1933,11 +1932,15 @@ void PspPlatform_AcknowledgeViEvent(void) {
 }
 
 void PspPlatform_PollInput(OSContPad* pads) {
-    if (PspProfiler_ExitRequested() || PspInput_Poll(pads)) {
-        PspPlatform_RequestExit();
-        PspProfiler_Shutdown();
-        sceKernelExitGame();
-    }
+    PspInput_Poll(pads);
+}
+
+// The scheduler has drained the active graphics task before saving captures
+void PspPlatform_ExitGame(void) {
+    PspProfiler_Shutdown();
+    PspHwCounterProfile_Shutdown();
+    PspPlatform_RequestExit();
+    sceKernelExitGame();
 }
 
 void PspPlatform_RunGfxTask(SPTask* task) {
@@ -1999,30 +2002,14 @@ void PspPlatform_RunAudioTask(SPTask* task) {
 }
 
 void PspPlatform_DebugFrame(void) {
-#if PSP_DEBUG_OVERLAY_ENABLED
-    static u32 sLastFrame;
+#if PSP_DEBUG_OVERLAY_ENABLED && PSP_LOG_ENABLED
     static u32 sLastLoggedFrame;
-
-    if (gSysFrameCount != sLastFrame) {
-        sLastFrame = gSysFrameCount;
-        pspDebugScreenSetXY(0, 4);
-        pspDebugScreenPrintf("frames %lu  vi %lu  gfx %lu  aud %lu   ",
-                             (unsigned long) gSysFrameCount,
-                             (unsigned long) sViCount,
-                             (unsigned long) sGfxTaskCount,
-                             (unsigned long) sAudioTaskCount);
-
-#if PSP_LOG_ENABLED
-        if ((gSysFrameCount <= 4) || ((gSysFrameCount - sLastLoggedFrame) >= 30)) {
-            sLastLoggedFrame = gSysFrameCount;
-            PspPlatform_LogFrame("heartbeat", gSysFrameCount);
-        }
-#else
-        (void) sLastLoggedFrame;
-#endif
+    if (gSysFrameCount != sLastLoggedFrame &&
+        ((gSysFrameCount <= 4) || ((gSysFrameCount - sLastLoggedFrame) >= 30))) {
+        sLastLoggedFrame = gSysFrameCount;
+        PspPlatform_LogFrame("heartbeat", gSysFrameCount);
     }
 #endif
-    PspProfiler_DrawStatus();
 }
 
 void PspPlatform_LogValue(const char* label, u32 value) {

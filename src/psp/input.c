@@ -1,11 +1,37 @@
 #include <pspctrl.h>
 
-#include "src/psp/gfx/gfx_psp_dl.h"
-#include "src/psp/display.h"
+#include <pspkernel.h>
 #include "src/psp/input.h"
-#include "src/psp/frame_scheduler.h"
-#include "src/psp/hw_counter_profile.h"
-#include "src/psp/profiler.h"
+#include "src/psp/menu.h"
+
+static OSContPad sPad;
+static u32 sPreviousButtons;
+static int sReleaseGate;
+static int sReleaseReady;
+#if PSP_MENU_CAPTURES
+static u32 sCaptureCombo;
+static u32 sCaptureSince;
+static int sCaptureFired;
+#endif
+
+static const PspInputBinding sBindings[] = {
+    { "D-pad Up", "C-Up", PSP_CTRL_UP, U_CBUTTONS },
+    { "D-pad Down", "C-Down", PSP_CTRL_DOWN, D_CBUTTONS },
+    { "D-pad Left", "C-Left", PSP_CTRL_LEFT, L_CBUTTONS },
+    { "D-pad Right", "C-Right", PSP_CTRL_RIGHT, R_CBUTTONS },
+    { "Cross", "A", PSP_CTRL_CROSS, A_BUTTON },
+    { "Circle", "B", PSP_CTRL_CIRCLE, B_BUTTON },
+    { "Square", "C-Down", PSP_CTRL_SQUARE, D_CBUTTONS },
+    { "Triangle", "C-Left", PSP_CTRL_TRIANGLE, L_CBUTTONS },
+    { "L", "Z", PSP_CTRL_LTRIGGER, Z_TRIG },
+    { "R", "R", PSP_CTRL_RTRIGGER, R_TRIG },
+    { "Start", "Start", PSP_CTRL_START, START_BUTTON }
+};
+
+const PspInputBinding* PspInput_GetBindings(int* count) {
+    *count = sizeof(sBindings) / sizeof(sBindings[0]);
+    return sBindings;
+}
 
 static s8 psp_input_scale_axis(u8 value, int invert) {
     s32 centered = (s32) value - 128;
@@ -31,60 +57,16 @@ static s8 psp_input_scale_axis(u8 value, int invert) {
 
 static void psp_input_map_buttons(const SceCtrlData* in, OSContPad* out) {
     const u32 buttons = in->Buttons;
-    const int cButtonMode = (buttons & PSP_CTRL_SELECT) != 0;
 
     out->button = 0;
     out->stick_x = psp_input_scale_axis(in->Lx, 0);
     out->stick_y = psp_input_scale_axis(in->Ly, 1);
     out->errno = 0;
 
-    if (buttons & PSP_CTRL_CROSS) {
-        out->button |= A_BUTTON;
-    }
-    if (buttons & PSP_CTRL_CIRCLE) {
-        out->button |= B_BUTTON;
-    }
-    if (buttons & PSP_CTRL_SQUARE) {
-        out->button |= D_CBUTTONS;
-    }
-    if (buttons & PSP_CTRL_TRIANGLE) {
-        out->button |= L_CBUTTONS;
-    }
-    if (buttons & PSP_CTRL_LTRIGGER) {
-        out->button |= Z_TRIG;
-    }
-    if (buttons & PSP_CTRL_RTRIGGER) {
-        out->button |= R_TRIG;
-    }
-    if (buttons & PSP_CTRL_START) {
-        out->button |= START_BUTTON;
-    }
-
-    if (cButtonMode) {
-        if (buttons & PSP_CTRL_UP) {
-            out->button |= U_CBUTTONS;
-        }
-        if (buttons & PSP_CTRL_DOWN) {
-            out->button |= D_CBUTTONS;
-        }
-        if (buttons & PSP_CTRL_LEFT) {
-            out->button |= L_CBUTTONS;
-        }
-        if (buttons & PSP_CTRL_RIGHT) {
-            out->button |= R_CBUTTONS;
-        }
-    } else {
-        if (buttons & PSP_CTRL_UP) {
-            out->button |= U_JPAD;
-        }
-        if (buttons & PSP_CTRL_DOWN) {
-            out->button |= D_JPAD;
-        }
-        if (buttons & PSP_CTRL_LEFT) {
-            out->button |= L_JPAD;
-        }
-        if (buttons & PSP_CTRL_RIGHT) {
-            out->button |= R_JPAD;
+    {
+        unsigned i;
+        for (i = 0; i < sizeof(sBindings) / sizeof(sBindings[0]); i++) {
+            if (buttons & sBindings[i].pspMask) out->button |= sBindings[i].n64Mask;
         }
     }
 }
@@ -94,69 +76,76 @@ void PspInput_Init(void) {
     sceCtrlSetSamplingMode(PSP_CTRL_MODE_ANALOG);
 }
 
-int PspInput_Poll(OSContPad* pads) {
+// Only the scheduler thread polls the PSP controller and changes menu state
+void PspInput_Update(void) {
     SceCtrlData pad;
-    static u32 previousButtons;
-    s32 i;
+    OSContPad mapped = { 0 };
+    u32 pressed;
+    int wasOpen;
+    int lock;
+    if (sceCtrlPeekBufferPositive(&pad, 1) <= 0) return;
+    pressed = pad.Buttons & ~sPreviousButtons;
+    sPreviousButtons = pad.Buttons;
+    wasOpen = PspMenu_IsOpen();
+    PspMenu_Update(pressed);
+    if (wasOpen || PspMenu_IsOpen()) sReleaseGate = 1;
 
+#if PSP_MENU_CAPTURES
+    if (!wasOpen && !PspMenu_IsOpen() && !sReleaseGate) {
+        u32 combo = 0;
+        u32 triggers = pad.Buttons & (PSP_CTRL_LTRIGGER | PSP_CTRL_RTRIGGER);
+        if ((pad.Buttons & PSP_CTRL_UP) &&
+            (triggers == PSP_CTRL_LTRIGGER || triggers == PSP_CTRL_RTRIGGER)) combo = triggers;
+        if (combo != sCaptureCombo) {
+            sCaptureCombo = combo;
+            sCaptureSince = sceKernelGetSystemTimeLow();
+            sCaptureFired = 0;
+        }
+        if (combo) {
+            if (!sCaptureFired && (u32)(sceKernelGetSystemTimeLow() - sCaptureSince) >= 250000) {
+                PspMenu_RequestCapture(combo == PSP_CTRL_LTRIGGER);
+                sCaptureFired = 1;
+            }
+            pad.Buttons &= ~(PSP_CTRL_UP | combo);
+        }
+    } else {
+        sCaptureCombo = 0;
+        sCaptureFired = 0;
+    }
+#endif
+    if (!PspMenu_IsOpen() && !sReleaseGate) psp_input_map_buttons(&pad, &mapped);
+    sReleaseReady = 0;
+    if (sReleaseGate && !PspMenu_IsOpen() && pad.Buttons == 0) {
+        s8 x = psp_input_scale_axis(pad.Lx, 0);
+        s8 y = psp_input_scale_axis(pad.Ly, 0);
+        sReleaseReady = x >= -16 && x <= 16 && y >= -16 && y <= 16;
+    }
+    lock = sceKernelCpuSuspendIntr();
+    sPad = mapped;
+    sceKernelCpuResumeIntr(lock);
+}
+
+// The serial interface reads a coherent snapshot without polling hardware
+void PspInput_Poll(OSContPad* pads) {
+    int lock;
+    s32 i;
     for (i = 0; i < MAXCONTROLLERS; i++) {
         pads[i].button = 0;
         pads[i].stick_x = 0;
         pads[i].stick_y = 0;
         pads[i].errno = (i == 0) ? 0 : CONT_NO_RESPONSE_ERROR;
     }
+    lock = sceKernelCpuSuspendIntr();
+    pads[0] = sPad;
+    sceKernelCpuResumeIntr(lock);
+}
 
-    if (sceCtrlPeekBufferPositive(&pad, 1) > 0) {
-        const u32 displayCombo = PSP_CTRL_SELECT | PSP_CTRL_SQUARE;
-        const u32 uiScaleCombo = PSP_CTRL_SELECT | PSP_CTRL_CROSS;
-        const u32 rateCombo = PSP_CTRL_SELECT | PSP_CTRL_CIRCLE;
-        int ratePressed = ((pad.Buttons & rateCombo) == rateCombo) &&
-                          ((previousButtons & rateCombo) != rateCombo);
-        int displayPressed = ((pad.Buttons & displayCombo) == displayCombo) &&
-                             ((previousButtons & displayCombo) != displayCombo);
-        int uiScalePressed = ((pad.Buttons & uiScaleCombo) == uiScaleCombo) &&
-                             ((previousButtons & uiScaleCombo) != uiScaleCombo);
-
-#if PSP_NATIVE_COVERAGE_AB && !PSP_GFX_BACKEND_GU
-        const u32 coverageCombo = PSP_CTRL_SELECT | PSP_CTRL_DOWN;
-        int coveragePressed = ((pad.Buttons & coverageCombo) == coverageCombo) &&
-                              ((previousButtons & coverageCombo) != coverageCombo);
-#endif
-
-        previousButtons = pad.Buttons;
-        if ((pad.Buttons & displayCombo) == displayCombo) {
-            if (displayPressed) {
-                PspDisplay_CycleMode();
-            }
-            pad.Buttons &= ~displayCombo;
-        } else if ((pad.Buttons & uiScaleCombo) == uiScaleCombo) {
-            if (uiScalePressed) {
-                PspDisplay_ToggleUiScaling();
-            }
-            pad.Buttons &= ~uiScaleCombo;
-        } else if ((pad.Buttons & rateCombo) == rateCombo) {
-            if (ratePressed) {
-                PspFrameScheduler_TogglePresentationRate();
-            }
-            pad.Buttons &= ~rateCombo;
-#if PSP_NATIVE_COVERAGE_AB && !PSP_GFX_BACKEND_GU
-        } else if ((pad.Buttons & coverageCombo) == coverageCombo) {
-            if (coveragePressed) {
-                PspGfxDl_ToggleNativeCoverage();
-            }
-            pad.Buttons &= ~coverageCombo;
-#endif
-        } else if (PspGfxDl_TracePollControls(pad.Buttons)) {
-            pad.Buttons &= ~(PSP_CTRL_SELECT | PSP_CTRL_TRIANGLE);
-        } else if (PspHwCounterProfile_PollControls(pad.Buttons)) {
-            pad.Buttons &= ~(PSP_CTRL_SELECT | PSP_CTRL_LTRIGGER | PSP_CTRL_RTRIGGER | PSP_CTRL_LEFT |
-                             PSP_CTRL_RIGHT);
-        } else if (PspProfiler_PollControls(pad.Buttons)) {
-            pad.Buttons &= ~(PSP_CTRL_SELECT | PSP_CTRL_LTRIGGER | PSP_CTRL_RTRIGGER);
-        }
-        psp_input_map_buttons(&pad, &pads[0]);
-        return (pad.Buttons & (PSP_CTRL_SELECT | PSP_CTRL_START)) == (PSP_CTRL_SELECT | PSP_CTRL_START);
+// Preserve serial input locks and supply one neutral simulation sample on close
+void PspInput_FilterGameInput(OSContPad* pads) {
+    if (sReleaseGate || PspMenu_IsOpen()) {
+        pads[0].button = 0;
+        pads[0].stick_x = 0;
+        pads[0].stick_y = 0;
+        if (sReleaseReady) sReleaseGate = 0;
     }
-
-    return 0;
 }

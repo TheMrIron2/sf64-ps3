@@ -4,10 +4,8 @@
 #include "src/psp/render_component.h"
 #endif
 
-#include <pspctrl.h>
 #include <pspiofilemgr.h>
 #include <pspkernel.h>
-#include <pspdebug.h>
 #include <psppower.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -496,11 +494,10 @@ typedef struct {
 #endif
 
 static volatile int sExitRequested;
-static PspProfilerStatus sStatus;
+static volatile PspProfilerStatus sStatus;
 static u32 sStatusSlot;
 static u32 sNextSlot;
-static u32 sPreviousButtons;
-static int sCaptureActive;
+static volatile int sCaptureActive;
 #if PROFILE_PHASES
 static u64 sMirrorEncodedLifetimeS;
 static u64 sMirrorEncodedLifetimeT;
@@ -2238,27 +2235,10 @@ void PspProfiler_Init(void) {
 #endif
 }
 
-int PspProfiler_PollControls(u32 rawButtons) {
-    u32 startCombo = PSP_CTRL_SELECT | PSP_CTRL_LTRIGGER;
-    u32 stopCombo = PSP_CTRL_SELECT | PSP_CTRL_RTRIGGER;
-    int startPressed = ((rawButtons & startCombo) == startCombo) && ((sPreviousButtons & startCombo) != startCombo);
-    int stopPressed = ((rawButtons & stopCombo) == stopCombo) && ((sPreviousButtons & stopCombo) != stopCombo);
-
-    sPreviousButtons = rawButtons;
-    if (startPressed) {
-        PspProfiler_StartCapture();
-        return 1;
-    }
-    if (stopPressed) {
-        PspProfiler_StopCapture();
-        PspProfiler_DumpCapture();
-        return 1;
-    }
-    return 0;
-}
-
 void PspProfiler_StartCapture(void) {
     u32 slot = sNextSlot;
+
+    if (sStatus == PSP_PROF_STATUS_ERROR && sCaptureStarted) return;
 
 #if PROFILE_GPROF
     if (sCaptureDumped) {
@@ -2371,7 +2351,7 @@ void PspProfiler_StopCapture(void) {
 }
 
 void PspProfiler_DumpCapture(void) {
-    if (!sCaptureStarted || sCaptureDumped) {
+    if (!sCaptureStarted || (sCaptureDumped && sStatus != PSP_PROF_STATUS_ERROR)) {
         return;
     }
     sCaptureDumped = 1;
@@ -2391,7 +2371,10 @@ void PspProfiler_DumpCapture(void) {
 }
 
 int PspProfiler_IsCapturing(void) {
-    return sCaptureActive;
+    int lock = sceKernelCpuSuspendIntr();
+    int active = sCaptureActive;
+    sceKernelCpuResumeIntr(lock);
+    return active;
 }
 
 void PspProfiler_Shutdown(void) {
@@ -2399,25 +2382,31 @@ void PspProfiler_Shutdown(void) {
     PspProfiler_DumpCapture();
 }
 
-void PspProfiler_DrawStatus(void) {
-#if PROFILE_GPROF || PROFILE_PHASES
-    const char* label = "PROF OFF";
+int PspProfiler_NeedsService(void) {
+    int lock = sceKernelCpuSuspendIntr();
+    int pending = sCaptureStarted && !sCaptureActive && !sCaptureDumped;
+    sceKernelCpuResumeIntr(lock);
+    return pending;
+}
 
-    if (sStatus == PSP_PROF_STATUS_REC) {
-        label = "PROF REC";
-    } else if (sStatus == PSP_PROF_STATUS_SAVED) {
-        label = "PROF SAVED";
-    } else if (sStatus == PSP_PROF_STATUS_ERROR) {
-        label = "PROF ERROR";
+void PspProfiler_Service(void) {
+    if (PspProfiler_NeedsService()) {
+        PspProfiler_DumpCapture();
     }
+}
 
-    pspDebugScreenSetXY(0, 1);
-    if (sStatus == PSP_PROF_STATUS_OFF || sStatus == PSP_PROF_STATUS_ERROR) {
-        pspDebugScreenPrintf("%s       ", label);
-    } else {
-        pspDebugScreenPrintf("%s %03lu   ", label, (unsigned long) sStatusSlot);
-    }
+const char* PspProfiler_GetStatus(void) {
+    if (sStatus == PSP_PROF_STATUS_ERROR) return "Save error";
+    if (sCaptureActive) return "Recording";
+    if (sCaptureStarted && !sCaptureDumped) return "Saving";
+    if (sStatus == PSP_PROF_STATUS_SAVED) {
+#if PROFILE_GPROF
+        return "Saved - restart for gprof";
+#else
+        return "Saved";
 #endif
+    }
+    return "Ready";
 }
 
 void PspProfiler_RequestExit(void) {
@@ -2577,7 +2566,6 @@ void PspProfiler_OnGfxTaskComplete(s32 presented) {
     psp_profiler_unlock(lockState);
     if (frames >= PROFILE_CAPTURE_FRAMES) {
         PspProfiler_StopCapture();
-        PspProfiler_DumpCapture();
     }
 }
 

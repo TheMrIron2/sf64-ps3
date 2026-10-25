@@ -3,8 +3,6 @@
 
 #if PROFILE_HW_COUNTERS
 
-#include <pspctrl.h>
-#include <pspdebug.h>
 #include <pspiofilemgr.h>
 #include <psppower.h>
 #include <pspthreadman.h>
@@ -239,8 +237,6 @@ static const char* sPspHwSceneNames[] = { "title", "corneria", "light", "other" 
 /* ms0 is absent on a PSP Go without an M2 card, ef0 is its internal flash
  * host0 is the PSPLINK host directory and catches both refusing writes */
 static const char* sPspHwRoots[PSP_HW_ROOT_COUNT] = { PSP_HW_PROFILE_DIR, PSP_HW_PROFILE_DIR_EF0, "host0:" };
-static const char sPspHwRootLetters[PSP_HW_ROOT_COUNT] = { 'M', 'E', 'H' };
-static const char* sPspHwStepNames[] = { "OK", "SLOT", "OPEN", "META", "WORK", "SCOPE", "CTRS", "DIAG", "PACE", "SOURCE", "FRAMES" };
 
 static PspHwCounterTotals sPspHwTotals;
 static PspHwFrameRecord sPspHwFrames[PSP_HW_COUNTER_CAPTURE_FRAMES];
@@ -294,13 +290,11 @@ static u32 sPspHwCurrentEffectUs[PSP_HW_EFFECT_TYPE_COUNT];
 static PspHwCounterSample sPspHwScopeStart[PSP_HW_SCOPE_COUNT];
 static const volatile PspDebugProfilerRegs* sPspHwRegs;
 static PspHwCounterSource sPspHwSource;
-static PspHwCounterStatus sPspHwStatus = PSP_HW_STATUS_READY;
+static volatile PspHwCounterStatus sPspHwStatus = PSP_HW_STATUS_READY;
 static u32 sPspHwScene;
 static u32 sPspHwSavedSlot;
 static u32 sPspHwWarmupFrames;
-static u32 sPspHwPreviousButtons;
 static volatile int sPspHwCaptureActive;
-static volatile int sPspHwStopRequested;
 static int sPspHwFrameArmed;
 static int sPspHwRenderThreadBound;
 static volatile int sPspHwDumpPending;
@@ -1058,7 +1052,7 @@ static void psp_hw_dump(void) {
 }
 
 static void psp_hw_start(void) {
-    if (sPspHwCaptureActive || sPspHwDumpPending) {
+    if (PspHwCounterProfile_IsBusy()) {
         return;
     }
     memset(&sPspHwTotals, 0, sizeof(sPspHwTotals));
@@ -1082,15 +1076,13 @@ static void psp_hw_start(void) {
     sPspHwLastTextureUploadBytes = 0;
     sPspHwFrameBeginValid = 0;
     sPspHwWarmupFrames = PSP_HW_COUNTER_WARMUP_FRAMES;
-    sPspHwStopRequested = 0;
     sPspHwFrameArmed = 0;
     sPspHwErrorStep = PSP_HW_STEP_NONE;
     sPspHwCaptureActive = 1;
     sPspHwStatus = (sPspHwWarmupFrames != 0) ? PSP_HW_STATUS_WARMUP : PSP_HW_STATUS_RECORDING;
 }
 
-/* The render thread only requests the dump, the input thread performs it
- * That matches the phase profiler, which is the write path known to work */
+// The render thread requests a dump for the next idle scheduler boundary
 static void psp_hw_request_dump(void) {
     sPspHwCaptureActive = 0;
     sPspHwFrameArmed = 0;
@@ -1112,10 +1104,8 @@ void PspHwCounterProfile_Init(void) {
     psp_hw_texture_reset();
 #endif
     sPspHwCaptureActive = 0;
-    sPspHwStopRequested = 0;
     sPspHwFrameArmed = 0;
     sPspHwScene = 0;
-    sPspHwPreviousButtons = 0;
     sPspHwRenderThreadBound = 0;
     sPspHwDumpPending = 0;
     sPspHwErrorStep = PSP_HW_STEP_NONE;
@@ -1132,41 +1122,45 @@ void PspHwCounterProfile_Shutdown(void) {
     psp_hw_service_dump();
 }
 
-int PspHwCounterProfile_PollControls(u32 rawButtons) {
-    const u32 previousSceneCombo = PSP_CTRL_SELECT | PSP_CTRL_LEFT;
-    const u32 nextSceneCombo = PSP_CTRL_SELECT | PSP_CTRL_RIGHT;
-    const u32 startCombo = PSP_CTRL_SELECT | PSP_CTRL_LTRIGGER;
-    const u32 stopCombo = PSP_CTRL_SELECT | PSP_CTRL_RTRIGGER;
-    int consumed = 0;
+int PspHwCounterProfile_NeedsService(void) {
+    return sPspHwDumpPending;
+}
 
+void PspHwCounterProfile_Service(void) {
     psp_hw_service_dump();
+}
 
-    if (!sPspHwCaptureActive && ((rawButtons & previousSceneCombo) == previousSceneCombo) &&
-        ((sPspHwPreviousButtons & previousSceneCombo) != previousSceneCombo)) {
-        sPspHwScene = (sPspHwScene + PSP_HW_SCENE_COUNT - 1) % PSP_HW_SCENE_COUNT;
-        sPspHwStatus = PSP_HW_STATUS_READY;
-    } else if (!sPspHwCaptureActive && ((rawButtons & nextSceneCombo) == nextSceneCombo) &&
-               ((sPspHwPreviousButtons & nextSceneCombo) != nextSceneCombo)) {
-        sPspHwScene = (sPspHwScene + 1) % PSP_HW_SCENE_COUNT;
-        sPspHwStatus = PSP_HW_STATUS_READY;
-    } else if (((rawButtons & startCombo) == startCombo) &&
-               ((sPspHwPreviousButtons & startCombo) != startCombo)) {
-        psp_hw_start();
-    } else if (((rawButtons & stopCombo) == stopCombo) &&
-               ((sPspHwPreviousButtons & stopCombo) != stopCombo)) {
-        if (sPspHwCaptureActive) {
-            sPspHwStopRequested = 1;
-        }
+void PspHwCounterProfile_StartCapture(void) {
+    psp_hw_start();
+}
+
+// The scheduler calls this only after the rendering task has completed
+void PspHwCounterProfile_StopCapture(void) {
+    if (sPspHwCaptureActive) {
+        psp_hw_request_dump();
     }
+    if (!sPspHwDumpPending && sPspHwStatus == PSP_HW_STATUS_ERROR) sPspHwDumpPending = 1;
+    psp_hw_service_dump();
+}
 
-    if (((rawButtons & previousSceneCombo) == previousSceneCombo) ||
-        ((rawButtons & nextSceneCombo) == nextSceneCombo) ||
-        ((rawButtons & startCombo) == startCombo) || ((rawButtons & stopCombo) == stopCombo)) {
-        consumed = 1;
+int PspHwCounterProfile_IsBusy(void) {
+    return sPspHwCaptureActive || sPspHwDumpPending ||
+           (sPspHwStatus == PSP_HW_STATUS_ERROR && sPspHwTotals.frames != 0);
+}
+
+const char* PspHwCounterProfile_GetScene(void) {
+    return sPspHwSceneNames[sPspHwScene];
+}
+
+void PspHwCounterProfile_CycleScene(int direction) {
+    if (!PspHwCounterProfile_IsBusy()) {
+        sPspHwScene = (sPspHwScene + PSP_HW_SCENE_COUNT + direction) % PSP_HW_SCENE_COUNT;
     }
+}
 
-    sPspHwPreviousButtons = rawButtons;
-    return consumed;
+const char* PspHwCounterProfile_GetStatus(void) {
+    static const char* const names[] = { "Ready", "Warmup", "Recording", "Saving", "Saved", "Save error" };
+    return names[sPspHwStatus];
 }
 
 void PspHwCounterProfile_FrameBegin(void) {
@@ -1227,12 +1221,6 @@ void PspHwCounterProfile_FrameEnd(u32 commands, u32 loadedVertices, u32 submitte
     u32 sourceCommands = 0;
 
     if (!sPspHwFrameArmed) {
-        if (sPspHwCaptureActive && sPspHwStopRequested && (sPspHwWarmupFrames != 0)) {
-            /* Aborted during warmup, nothing recorded */
-            sPspHwCaptureActive = 0;
-            sPspHwStopRequested = 0;
-            sPspHwStatus = PSP_HW_STATUS_READY;
-        }
         return;
     }
 
@@ -1308,7 +1296,7 @@ void PspHwCounterProfile_FrameEnd(u32 commands, u32 loadedVertices, u32 submitte
     sPspHwTotals.submittedVertices += submittedVertices;
     sPspHwTotals.frames++;
 
-    if ((sPspHwTotals.frames >= PSP_HW_COUNTER_CAPTURE_FRAMES) || sPspHwStopRequested) {
+    if (sPspHwTotals.frames >= PSP_HW_COUNTER_CAPTURE_FRAMES) {
         psp_hw_request_dump();
     }
 }
@@ -1512,30 +1500,6 @@ void PspHwCounterProfile_RecordDisplayList(u32 source, u32 rawTarget, const void
     sPspHwDlSourceFull = 1;
     sPspHwDlSourceOverflowCalls++;
     sPspHwDlSourceOverflowCommands += commands;
-}
-
-void PspHwCounterProfile_DrawStatus(void) {
-    const char* scene = sPspHwSceneNames[sPspHwScene];
-    const char* source = (sPspHwSource == PSP_HW_SOURCE_NONE) ? "TIME" : "CTRS";
-
-    pspDebugScreenSetXY(0, 2);
-    if (sPspHwStatus == PSP_HW_STATUS_WARMUP) {
-        pspDebugScreenPrintf("HW %-8s %s WARM %03lu    ", scene, source,
-                             (unsigned long) sPspHwWarmupFrames);
-    } else if (sPspHwStatus == PSP_HW_STATUS_RECORDING) {
-        pspDebugScreenPrintf("HW %-8s %s REC %03lu/%03u", scene, source,
-                             (unsigned long) sPspHwTotals.frames, PSP_HW_COUNTER_CAPTURE_FRAMES);
-    } else if (sPspHwStatus == PSP_HW_STATUS_SAVING) {
-        pspDebugScreenPrintf("HW %-8s %s SAVING     ", scene, source);
-    } else if (sPspHwStatus == PSP_HW_STATUS_SAVED) {
-        pspDebugScreenPrintf("HW %-8s %s SAVED %03lu %c ", scene, source,
-                             (unsigned long) sPspHwSavedSlot, sPspHwRootLetters[sPspHwErrorRoot]);
-    } else if (sPspHwStatus == PSP_HW_STATUS_ERROR) {
-        pspDebugScreenPrintf("HW %-8s %s ERR %s %c %08X", scene, source, sPspHwStepNames[sPspHwErrorStep],
-                             sPspHwRootLetters[sPspHwErrorRoot], (unsigned) sPspHwErrorCode);
-    } else {
-        pspDebugScreenPrintf("HW %-8s %s READY      ", scene, source);
-    }
 }
 
 #else

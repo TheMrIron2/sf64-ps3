@@ -10,9 +10,11 @@
 #include "src/psp/platform.h"
 #include "src/psp/profiler.h"
 #include "src/psp/renderer.h"
+#include "src/psp/menu.h"
+#include "src/psp/settings.h"
+#include "src/psp/overlay.h"
 
 #include <pspkernel.h>
-#include <pspdebug.h>
 #include <stdint.h>
 // <string.h> drags in <strings.h>, which conflicts with PR/os_libc.h via sf64thread.h
 
@@ -41,63 +43,57 @@ static int sPerfReady;
 
 #endif
 
-static void psp_renderer_draw_overlays(void) {
-#if PSP_FPS_OVERLAY || PROFILE_GPROF || PROFILE_PHASES || PROFILE_HW_COUNTERS || PSP_NATIVE_COVERAGE_AB
-    void* framebuffer;
-    int bufferWidth;
-    int pixelFormat;
-    uintptr_t uncachedAddress;
-
-    framebuffer = NULL;
-    bufferWidth = 0;
-    pixelFormat = 0;
-
-    framebuffer = PspGfxDevice_GetOverlayFrameBuffer(&bufferWidth, &pixelFormat);
-
-    if ((framebuffer == NULL) || (bufferWidth != 512)) {
-        return;
+static int psp_renderer_draw_overlays(int menuFrame) {
+    char text[96];
+    int menu = PspMenu_Visible();
+    int perf = PspSettings_PerformanceVisible();
+    (void) text;
+#if PROFILE_GPROF || PROFILE_PHASES
+    if (!menu && (PspProfiler_IsCapturing() || PspProfiler_NeedsService())) return 0;
+#endif
+#if PROFILE_HW_COUNTERS
+    if (!menu && PspHwCounterProfile_IsCapturingTask()) return 0;
+#endif
+    if (!menu && !perf && !PROFILE_GPROF && !PROFILE_PHASES && !PROFILE_HW_COUNTERS &&
+        !(PSP_NATIVE_COVERAGE_AB && !PSP_GFX_BACKEND_GU)) return 0;
+    if (!(menuFrame ? PspOverlay_BeginMenuFrame() : PspOverlay_Begin())) return 0;
+    if (menu) {
+        PspMenu_Draw();
+        PspOverlay_MenuEnd();
     }
-
-    uncachedAddress = ((uintptr_t) framebuffer) | (uintptr_t) 0x40000000U;
-
-    pspDebugScreenSetBase((u32*) uncachedAddress);
-    pspDebugScreenSetColorMode(pixelFormat);
-
-    pspDebugScreenSetBackColor(0x00000000);
-    pspDebugScreenSetTextColor(0xFFFFFFFF);
-    pspDebugScreenEnableBackColor(1);
 #if PSP_FPS_OVERLAY
-    if (sPerfReady) {
-        pspDebugScreenSetXY(0, 0);
-        pspDebugScreenPrintf(
-            "FPS %lu.%lu  SIM %lu.%lu  GFX %lu.%lu/%lu.%lums  CAP %u SKIP %lu   ",
-            (unsigned long) (sPerfFpsTenths / 10),
-            (unsigned long) (sPerfFpsTenths % 10),
-            (unsigned long) (sPerfSimulationTenths / 10),
-            (unsigned long) (sPerfSimulationTenths % 10),
-            (unsigned long) (sPerfGfxMsTenths / 10),
-            (unsigned long) (sPerfGfxMsTenths % 10),
-            (unsigned long) (sPerfGfxPeakTenths / 10),
-            (unsigned long) (sPerfGfxPeakTenths % 10),
-            (unsigned int) (60 / PspFrameScheduler_GetPresentationVIs()),
-            (unsigned long) sPerfSkipped
-        );
+    if (perf && sPerfReady) {
+        if (menu) PspOverlay_Rect(0, 0, 480, 8, 0xD8000000);
+        snprintf(text, sizeof(text), "FPS %lu.%lu SIM %lu.%lu GFX %lu.%lu/%lu.%lums CAP %u SKIP %lu",
+                 (unsigned long)(sPerfFpsTenths / 10), (unsigned long)(sPerfFpsTenths % 10),
+                 (unsigned long)(sPerfSimulationTenths / 10), (unsigned long)(sPerfSimulationTenths % 10),
+                 (unsigned long)(sPerfGfxMsTenths / 10), (unsigned long)(sPerfGfxMsTenths % 10),
+                 (unsigned long)(sPerfGfxPeakTenths / 10), (unsigned long)(sPerfGfxPeakTenths % 10),
+                 (unsigned)(60 / PspFrameScheduler_GetPresentationVIs()), (unsigned long)sPerfSkipped);
+        PspOverlay_Text(0, 0, 0xFFFFFFFF, text);
     }
+#endif
+#if PROFILE_GPROF || PROFILE_PHASES
+    if (menu) PspOverlay_Rect(0, 9, 480, 8, 0xD8000000);
+    snprintf(text, sizeof(text), "PROF %s", PspProfiler_GetStatus());
+    PspOverlay_Text(0, 9, 0xFFFFFFFF, text);
+#endif
+#if PROFILE_HW_COUNTERS
+    if (menu) PspOverlay_Rect(0, 18, 480, 8, 0xD8000000);
+    snprintf(text, sizeof(text), "HW %s %s", PspHwCounterProfile_GetScene(), PspHwCounterProfile_GetStatus());
+    PspOverlay_Text(0, 18, 0xFFFFFFFF, text);
 #endif
 #if PSP_NATIVE_COVERAGE_AB && !PSP_GFX_BACKEND_GU
     {
         PspGfxDlNativeCoverageStats stats;
-
         PspGfxDl_GetNativeCoverageStats(&stats);
-        pspDebugScreenSetXY(0, 3);
-        pspDebugScreenPrintf("AC%lu F%lu %s%lu       ", (unsigned long) stats.mode,
-                             (unsigned long) stats.calls, stats.mode == 1 ? "MC" : "BY",
-                             (unsigned long) stats.commands);
+        snprintf(text, sizeof(text), "AC%lu F%lu %s%lu", (unsigned long)stats.mode,
+                 (unsigned long)stats.calls, stats.mode == 1 ? "MC" : "BY", (unsigned long)stats.commands);
+        PspOverlay_Text(0, 27, 0xFFFFFFFF, text);
     }
 #endif
-    PspProfiler_DrawStatus();
-    PspHwCounterProfile_DrawStatus();
-#endif
+    PspOverlay_End();
+    return 1;
 }
 
 #if PSP_FPS_OVERLAY
@@ -188,6 +184,9 @@ void PspRenderer_Init(void) {
 int PspRenderer_RenderGfxTask(SPTask* task, u32 taskIndex) {
     const Gfx* dl;
     int presented;
+#if PSP_GFX_BACKEND_GU
+    int menuDrawn = 0;
+#endif
 
     #if PROFILE_HW_COUNTERS
         u32 hwCommands = 0;
@@ -236,6 +235,9 @@ int PspRenderer_RenderGfxTask(SPTask* task, u32 taskIndex) {
     #endif
         }
         PspFrameInterpolation_FinishPresentation(task);
+#if PSP_GFX_BACKEND_GU
+        if (PspMenu_Visible()) menuDrawn = psp_renderer_draw_overlays(1);
+#endif
 
         PspHwCounterProfile_ScopeEnd(PSP_HW_SCOPE_FRONTEND);
         PspHwCounterProfile_ScopeBegin(PSP_HW_SCOPE_FLUSH);
@@ -248,7 +250,9 @@ int PspRenderer_RenderGfxTask(SPTask* task, u32 taskIndex) {
     #endif
 
 #if PSP_GFX_BACKEND_GU
-        psp_renderer_draw_overlays();
+        if (!menuDrawn) psp_renderer_draw_overlays(0);
+#else
+        psp_renderer_draw_overlays(0);
 #endif
         PspHwCounterProfile_ScopeBegin(PSP_HW_SCOPE_PRESENT);
         PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PRESENT_SWAP);
@@ -267,9 +271,6 @@ int PspRenderer_RenderGfxTask(SPTask* task, u32 taskIndex) {
         }
     #endif
 
-#if PSP_GFX_BACKEND_PSPGL
-        psp_renderer_draw_overlays();
-#endif
         return presented;
 }
 
