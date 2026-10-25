@@ -3,7 +3,6 @@
 #include <stdio.h>
 
 #include "src/psp/menu.h"
-#include "src/psp/input.h"
 #include "src/psp/overlay.h"
 #include "src/psp/settings.h"
 #include "src/psp/display.h"
@@ -16,7 +15,7 @@
 #define MENU_TEXT 60
 #define MENU_VISIBLE_ROWS 5
 
-enum { MENU_MAIN, MENU_GRAPHICS, MENU_CONTROLS, MENU_DIAGNOSTICS, MENU_ABOUT };
+enum { MENU_MAIN, MENU_SETTINGS, MENU_GRAPHICS, MENU_DIAGNOSTICS };
 enum { ACTION_NONE, ACTION_START, ACTION_STOP, ACTION_TYPE, ACTION_SCENE_PREV, ACTION_SCENE_NEXT,
        ACTION_TRACE, ACTION_COVERAGE };
 
@@ -26,6 +25,7 @@ typedef struct {
     int count;
     int cursor;
     int main;
+    u32 accent;
     char title[MENU_TEXT];
     char rows[MENU_ROWS][MENU_TEXT];
     char status[MENU_TEXT];
@@ -34,6 +34,9 @@ typedef struct {
 static int sOpen;
 static int sScreen;
 static int sSelected;
+static int sAudio;
+static int sColour;
+static const u32 sAccents[] = { 0xCD4E5C26, 0xCD3838A0, 0xCDA06030 };
 #if PSP_MENU_DIAGNOSTICS
 static int sAction;
 #endif
@@ -44,13 +47,9 @@ static int sHardware = PROFILE_HW_COUNTERS && !(PROFILE_GPROF || PROFILE_PHASES)
 static PspMenuView sView;
 
 static int menu_rows(void) {
-    if (sScreen == MENU_MAIN) return 4 + !!PSP_MENU_DIAGNOSTICS;
+    if (sScreen == MENU_MAIN) return 3 + !!PSP_MENU_DIAGNOSTICS;
     if (sScreen == MENU_GRAPHICS) return 2 + !!PSP_FPS_OVERLAY;
-    if (sScreen == MENU_CONTROLS) {
-        int count;
-        PspInput_GetBindings(&count);
-        return count + 1 > MENU_VISIBLE_ROWS ? count + 2 - MENU_VISIBLE_ROWS : 1;
-    }
+    if (sScreen == MENU_SETTINGS) return 2;
     if (sScreen == MENU_DIAGNOSTICS) {
         return 1 + (PSP_MENU_CAPTURES ? 3 : 0) + !!PROFILE_HW_COUNTERS +
                !!PSP_RENDERER_DIAGNOSTICS + !!(PSP_NATIVE_COVERAGE_AB && !PSP_GFX_BACKEND_GU);
@@ -94,13 +93,12 @@ void PspMenu_Update(u32 pressed) {
     if (sScreen == MENU_MAIN && activate) {
         if (sSelected == 0) sOpen = 0;
         else {
-            sScreen = sSelected == 1 ? MENU_GRAPHICS : sSelected == 2 ? MENU_CONTROLS :
-#if PSP_MENU_DIAGNOSTICS
-                      sSelected == 3 ? MENU_DIAGNOSTICS :
-#endif
-                      MENU_ABOUT;
+            sScreen = sSelected == 1 ? MENU_SETTINGS : sSelected == 2 ? MENU_GRAPHICS : MENU_DIAGNOSTICS;
             sSelected = 0;
         }
+    } else if (sScreen == MENU_SETTINGS) {
+        if (sSelected == 0) sAudio = (sAudio + direction + 3) % 3;
+        else sColour = (sColour + direction + 3) % 3;
     } else if (sScreen == MENU_GRAPHICS) {
         if (sSelected == 0) {
             int mode = PspDisplay_GetConfig()->mode;
@@ -217,14 +215,21 @@ void PspMenu_Publish(void) {
     view.selected = sSelected;
     view.cursor = sSelected;
     view.main = sScreen == MENU_MAIN;
+    view.accent = sAccents[sColour];
 #define ROW(...) snprintf(view.rows[n++], MENU_TEXT, __VA_ARGS__)
     if (sScreen == MENU_MAIN) {
         snprintf(view.title, MENU_TEXT, "%s", "Star Fox 64 PSP");
-        ROW("Resume Game"); ROW("Graphics & Display"); ROW("Controls");
+        ROW("Resume Game"); ROW("Settings"); ROW("Graphics & Display");
 #if PSP_MENU_DIAGNOSTICS
         ROW("Performance / Diagnostics");
 #endif
-        ROW("About");
+    } else if (sScreen == MENU_SETTINGS) {
+        static const char* const audio[] = { "Off", "Sync", "Async" };
+        static const char* const colours[] = { "Green", "Red", "Blue" };
+        snprintf(view.title, MENU_TEXT, "%s", "Settings");
+        ROW("Audio: <%s>", audio[sAudio]);
+        ROW("Colour: <%s>", colours[sColour]);
+        snprintf(view.status, MENU_TEXT, "%s", "Audio selection is a placeholder");
     } else if (sScreen == MENU_GRAPHICS) {
         int mode = PspDisplay_GetConfig()->mode;
         int vis = PspFrameScheduler_GetPresentationVIs();
@@ -235,13 +240,6 @@ void PspMenu_Publish(void) {
 #if PSP_FPS_OVERLAY
         ROW("Performance overlay: %s", PspSettings_PerformanceVisible() ? "On" : "Off");
 #endif
-    } else if (sScreen == MENU_CONTROLS) {
-        int count, i;
-        const PspInputBinding* bindings = PspInput_GetBindings(&count);
-        snprintf(view.title, MENU_TEXT, "%s", "Controls");
-        for (i = 0; i < count && n < MENU_ROWS - 1; i++) ROW("%s: %s", bindings[i].pspName, bindings[i].n64Name);
-        ROW("Analog: N64 stick");
-        view.selected = -1;
     } else if (sScreen == MENU_DIAGNOSTICS) {
         snprintf(view.title, MENU_TEXT, "%s", "Performance / Diagnostics");
 #if PSP_MENU_CAPTURES
@@ -267,14 +265,8 @@ void PspMenu_Publish(void) {
         }
 #endif
         ROW("Back");
-    } else {
-        snprintf(view.title, MENU_TEXT, "%s", "About");
-        ROW("Star Fox 64 PSP");
-        ROW("TheMrIron2/sf64-psp");
-        ROW("Educational native PSP port");
-        ROW("Backend: %s", PSP_GFX_BACKEND_NAME);
-        view.selected = -1;
     }
+
 #undef ROW
     view.count = n;
     lock = sceKernelCpuSuspendIntr();
@@ -331,13 +323,17 @@ void PspMenu_Draw(void) {
     rowTop = top + (view.main ? 10 : 38);
     PspOverlay_MenuBegin();
     PspOverlay_Rect(90, top, 300, height, 0xE0000000);
+    PspOverlay_Rect(90, top, 300, 1, view.accent);
+    PspOverlay_Rect(90, top + height - 1, 300, 1, view.accent);
+    PspOverlay_Rect(90, top + 1, 1, height - 2, view.accent);
+    PspOverlay_Rect(389, top + 1, 1, height - 2, view.accent);
     if (!view.main) menu_label(110, top + 9, 260, 1, 0xFFF5FFFF, view.title);
     for (i = 0; i < visible; i++) {
         int row = first + i;
         int y = rowTop + i * rowHeight;
         u32 color = 0xFFDAE0DA;
         if (row == view.selected) {
-            PspOverlay_Rect(104, y + (view.main ? 2 : 0), 272, view.main ? 30 : 24, 0xCD4E5C26);
+            PspOverlay_Rect(104, y + (view.main ? 2 : 0), 272, view.main ? 30 : 24, view.accent);
             color = 0xFFF5FFFF;
         }
         menu_label(114, y + (view.main ? 7 : 2), 252, view.main, color, view.rows[row]);
