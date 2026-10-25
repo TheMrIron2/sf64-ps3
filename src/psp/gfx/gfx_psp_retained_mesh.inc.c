@@ -225,7 +225,7 @@ static void psp_gfx_dl_retained_draw(PspGfxDlContext* ctx, PspGfxVertex* stream,
             state.projectionSerial = ctx->projectionSerial;
             state.viewport = psp_gfx_dl_resolve_viewport(ctx, NULL, 0, state.projectionMatrix);
 
-            PspGfxBackend_DrawMesh(vertices, sRetainedCache->mesh.indices + indexFirst, indexCount, &state,
+            PspGfxBackendGu_DrawMesh(vertices, sRetainedCache->mesh.indices + indexFirst, indexCount, &state,
                 &ctx->alignedMatrices.modelview.m[0][0], (ctx->geometryMode & G_CULL_FRONT) != 0,
                 (ctx->geometryMode & G_CULL_BACK) != 0);
 
@@ -303,7 +303,7 @@ static __attribute__((noinline)) int psp_gfx_dl_retained_dispatch(PspGfxDlContex
         sRetainedStats.rejects[MESH_REJECT_MATERIALS]++; return 0;
     }
 
-    stream = PspGfxBackend_AllocateMeshVertices(sRetainedCache->mesh.stream_count, sRetainedCache->mesh.span_count);
+    stream = PspGfxBackendGu_AllocateMeshVertices(sRetainedCache->mesh.stream_count, sRetainedCache->mesh.span_count);
 
     if (!stream) {
         sRetainedStats.rejects[MESH_REJECT_ALLOCATE]++; return 0;

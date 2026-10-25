@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include "src/psp/overlay.h"
+#include "src/psp/gfx/gfx_psp_backend.h"
 #include "src/psp/gfx/gfx_psp_device.h"
 #include "src/psp/fonts/menu_font.h"
 #if PSP_GFX_BACKEND_GU
@@ -9,7 +10,9 @@ static int sGuDrawing;
 
 #if PSP_GFX_BACKEND_PSPGL
 #include <GLES/gl.h>
-#else
+#endif
+
+#if PSP_GFX_BACKEND_GU || !PSP_GFX_BACKEND_PSPGL
 static void* sPixels;
 static int sStride;
 static int sFormat;
@@ -87,6 +90,7 @@ static void overlay_font(void) {
 
 int PspOverlay_Begin(void) {
 #if PSP_GFX_BACKEND_PSPGL
+    if (!PspGfxBackend_IsGu()) {
     sCount = 0;
     sTextured = 0;
     overlay_font();
@@ -114,7 +118,9 @@ int PspOverlay_Begin(void) {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
     return 1;
-#else
+    }
+#endif
+#if PSP_GFX_BACKEND_GU || !PSP_GFX_BACKEND_PSPGL
 #if PSP_GFX_BACKEND_GU
     sGuDrawing = 0;
 #endif
@@ -123,9 +129,10 @@ int PspOverlay_Begin(void) {
     sPixels = (void*)((uintptr_t)sPixels | 0x40000000U);
     return 1;
 #endif
+    return 0;
 }
 
-#if !PSP_GFX_BACKEND_PSPGL
+#if PSP_GFX_BACKEND_GU || !PSP_GFX_BACKEND_PSPGL
 static u32 overlay_unpack(u32 p) {
     if (sFormat == 3) return p;
     if (sFormat == 2) return ((p & 15) * 17) | (((p >> 4) & 15) * 17 << 8) |
@@ -159,6 +166,7 @@ void PspOverlay_Rect(int x, int y, int width, int height, u32 color) {
     }
 #endif
 #if PSP_GFX_BACKEND_PSPGL
+    if (!PspGfxBackend_IsGu()) {
     {
         OverlayVertex v[6] = {
             {0,0,color,x,y,0}, {0,0,color,right,y,0}, {0,0,color,x,bottom,0},
@@ -169,7 +177,10 @@ void PspOverlay_Rect(int x, int y, int width, int height, u32 color) {
         if (sCount + 6 > 768) overlay_flush();
         for (i = 0; i < 6; i++) sVertices[sCount++] = v[i];
     }
-#else
+        return;
+    }
+#endif
+#if PSP_GFX_BACKEND_GU || !PSP_GFX_BACKEND_PSPGL
     {
         int ix, iy;
         unsigned alpha = color >> 24;
@@ -205,37 +216,47 @@ void PspOverlay_Text(int x, int y, u32 color, const char* text) {
         return;
     }
 #endif
-    while (*text && x + 5 <= 480) {
-        unsigned ch = (u8)*text++;
-#if !PSP_GFX_BACKEND_PSPGL
-        int row, col;
-#endif
-        if (ch >= 'a' && ch <= 'z') ch -= 'a' - 'A';
-        if (ch < 32 || ch > 95) ch = '?';
 #if PSP_GFX_BACKEND_PSPGL
-        {
-            float u = ((ch - 32) % 16 * 8) / 128.0f;
-            float v = ((ch - 32) / 16 * 8) / 32.0f;
-            float u1 = u + 5 / 128.0f;
-            float v1 = v + 7 / 32.0f;
-            OverlayVertex vertices[6] = {
-                {u,v,color,x,y,0}, {u1,v,color,x+5,y,0}, {u,v1,color,x,y+7,0},
-                {u,v1,color,x,y+7,0}, {u1,v,color,x+5,y,0}, {u1,v1,color,x+5,y+7,0}
-            };
+    if (!PspGfxBackend_IsGu()) {
+        while (*text && x + 5 <= 480) {
+            unsigned ch = (u8)*text++;
+            float u, v, u1, v1;
+            OverlayVertex vertices[6];
             int i;
+            if (ch >= 'a' && ch <= 'z') ch -= 'a' - 'A';
+            if (ch < 32 || ch > 95) ch = '?';
+            u = ((ch - 32) % 16 * 8) / 128.0f;
+            v = ((ch - 32) / 16 * 8) / 32.0f;
+            u1 = u + 5 / 128.0f;
+            v1 = v + 7 / 32.0f;
+            vertices[0] = (OverlayVertex){u,v,color,x,y,0};
+            vertices[1] = (OverlayVertex){u1,v,color,x+5,y,0};
+            vertices[2] = (OverlayVertex){u,v1,color,x,y+7,0};
+            vertices[3] = vertices[2];
+            vertices[4] = vertices[1];
+            vertices[5] = (OverlayVertex){u1,v1,color,x+5,y+7,0};
             overlay_texture(1);
             if (sCount + 6 > 768) overlay_flush();
             for (i = 0; i < 6; i++) sVertices[sCount++] = vertices[i];
+            x += 6;
         }
-#else
+        return;
+    }
+#endif
+#if PSP_GFX_BACKEND_GU || !PSP_GFX_BACKEND_PSPGL
+    while (*text && x + 5 <= 480) {
+        unsigned ch = (u8)*text++;
+        int row, col;
+        if (ch >= 'a' && ch <= 'z') ch -= 'a' - 'A';
+        if (ch < 32 || ch > 95) ch = '?';
         for (row = 0; row < 7; row++) {
             for (col = 0; col < 5; col++) {
                 if (sFont[ch - 32][col] & (1 << row)) PspOverlay_Rect(x + col, y + row, 1, 1, color);
             }
         }
-#endif
         x += 6;
     }
+#endif
 }
 
 void PspOverlay_End(void) {
@@ -247,9 +268,12 @@ void PspOverlay_End(void) {
     }
 #endif
 #if PSP_GFX_BACKEND_PSPGL
-    overlay_flush();
-    // The next BeginFrame resets matrices viewport arrays and the renderer state cache
-#else
+    if (!PspGfxBackend_IsGu()) {
+        overlay_flush();
+        return;
+    }
+#endif
+#if PSP_GFX_BACKEND_GU || !PSP_GFX_BACKEND_PSPGL
     __sync_synchronize();
 #endif
 }
@@ -278,6 +302,7 @@ void PspOverlay_MenuBegin(void) {
     if (sGuDrawing) PspOverlayGu_MenuFont(sMenuFontPixels);
 #endif
 #if PSP_GFX_BACKEND_PSPGL
+    if (!PspGfxBackend_IsGu()) {
     overlay_flush();
     if (!sMenuFontTexture) {
         static u16 pixels[256 * 128];
@@ -295,6 +320,7 @@ void PspOverlay_MenuBegin(void) {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 256, 128, 0, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, pixels);
     } else {
         glBindTexture(GL_TEXTURE_2D, sMenuFontTexture);
+    }
     }
 #endif
 }
@@ -322,6 +348,7 @@ static void overlay_menu_glyph(int x, int y, unsigned ch, u32 color) {
     }
 #endif
 #if PSP_GFX_BACKEND_PSPGL
+    if (!PspGfxBackend_IsGu()) {
     {
         float u = ((ch - 32) % 16 * 16) / 256.0f;
         float v = ((ch - 32) / 16 * 16) / 128.0f;
@@ -338,7 +365,10 @@ static void overlay_menu_glyph(int x, int y, unsigned ch, u32 color) {
         if (sCount + 6 > 768) overlay_flush();
         for (i = 0; i < 6; i++) sVertices[sCount++] = vertices[i];
     }
-#else
+        return;
+    }
+#endif
+#if PSP_GFX_BACKEND_GU || !PSP_GFX_BACKEND_PSPGL
     {
         int row, column;
         int origin = (ch - 32) / 16 * 16 * 256 + (ch - 32) % 16 * 16;
@@ -379,16 +409,19 @@ void PspOverlay_MenuText(int x, int y, u32 color, const char* text) {
 
 int PspOverlay_BeginMenuFrame(void) {
 #if PSP_GFX_BACKEND_GU
-    sGuDrawing = PspOverlayGu_Begin(sFont);
-    return sGuDrawing;
-#else
-    return PspOverlay_Begin();
+    if (PspGfxBackend_IsGu()) {
+        sGuDrawing = PspOverlayGu_Begin(sFont);
+        return sGuDrawing;
+    }
 #endif
+    return PspOverlay_Begin();
 }
 
 void PspOverlay_MenuEnd(void) {
 #if PSP_GFX_BACKEND_PSPGL
-    overlay_flush();
-    glBindTexture(GL_TEXTURE_2D, sFontTexture);
+    if (!PspGfxBackend_IsGu()) {
+        overlay_flush();
+        glBindTexture(GL_TEXTURE_2D, sFontTexture);
+    }
 #endif
 }

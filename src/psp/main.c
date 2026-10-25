@@ -8,6 +8,8 @@
 #if PSP_AUDIO
 #include "src/psp/audio_me.h"
 #endif
+#include "src/psp/settings.h"
+#include "src/psp/gfx/gfx_psp_backend.h"
 #include "src/psp/hw_counter_profile.h"
 #include "src/psp/n64psp_integration.h"
 #include "src/psp/platform.h"
@@ -58,6 +60,8 @@ void setup_callbacks(void) {
 int main(int argc, char* argv[]) {
 #ifndef PSP_FULL
     SceCtrlData pad;
+#else
+    PspGfxBackendKind buildBackend;
 #endif
 
     (void) argc;
@@ -71,9 +75,17 @@ int main(int argc, char* argv[]) {
     scePowerSetClockFrequency(333, 333, 166);
 
 #ifdef PSP_FULL
+    buildBackend = PspGfxBackend_GetBuildDefault();
+    PspSettings_Init(argc > 0 ? argv[0] : NULL, buildBackend);
+    if (!PspGfxBackend_Select(PspSettings_GetGraphicsBackend())) {
+        PspGfxBackend_Select(buildBackend);
+    }
+    PspSettings_SetActiveGraphicsBackend(PspGfxBackend_GetActive());
+
     pspDebugScreenPrintf("Star Fox 64\n");
     pspDebugScreenPrintf("Booting native game loop...\n\n");
     pspDebugScreenPrintf("SELECT opens settings   HOME opens system menu\n");
+    pspDebugScreenPrintf("Graphics backend: %s\n", PspGfxBackend_GetName());
 #if PROFILE_GPROF || PROFILE_PHASES || PROFILE_HW_COUNTERS
     pspDebugScreenPrintf("Hold D-pad Up+L to capture, Up+R to save\n");
 #endif

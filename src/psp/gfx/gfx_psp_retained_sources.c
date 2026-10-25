@@ -134,7 +134,7 @@ static int psp_gfx_dl_retained_build(const Gfx* child, u32 commandsCount, u32 sl
             if (!i || value > cache->bounds[1][axis]) cache->bounds[1][axis] = value;
         }
     }
-    PspGfxBackend_SealMeshIndices(cache->mesh.indices, cache->mesh.index_count);
+    PspGfxBackendGu_SealMeshIndices(cache->mesh.indices, cache->mesh.index_count);
     psp_gfx_retained_program_build(slot, &cache->mesh);
     sRetainedBuilt[slot] = 1;
     return 1;

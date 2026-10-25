@@ -5,6 +5,12 @@
 
 #include <stddef.h>
 
+#if PSP_GFX_BACKEND_GU && PSP_GFX_BACKEND_PSPGL
+#define PSP_GFX_BACKEND_SELECTABLE 1
+#else
+#define PSP_GFX_BACKEND_SELECTABLE 0
+#endif
+
 // Native GE vertex order
 typedef struct {
     float u;
@@ -53,9 +59,6 @@ static inline int PspGfxTextureHandle_Equals(PspGfxTextureHandle a, PspGfxTextur
     return (a.opaque[0] == b.opaque[0]) && (a.opaque[1] == b.opaque[1]) && (a.opaque[2] == b.opaque[2]) &&
            (a.opaque[3] == b.opaque[3]);
 }
-
-u32 PspGfxBackend_TextureDebugId(PspGfxTextureHandle handle);
-u32 PspGfxBackend_TextureDebugGeneration(PspGfxTextureHandle handle);
 
 typedef struct {
     u32 opaque;
@@ -164,25 +167,101 @@ typedef struct {
     PspGfxViewportPolicy viewport;
 } PspGfxFogDrawState;
 
+typedef enum {
+    PSP_GFX_KIND_GU,
+    PSP_GFX_KIND_PSPGL,
+} PspGfxBackendKind;
+
+typedef struct {
+    u32 (*TextureDebugId)(PspGfxTextureHandle handle);
+    u32 (*TextureDebugGeneration)(PspGfxTextureHandle handle);
+    int (*TextureSupported)(const PspGfxTextureRequest* request);
+    int (*FindTexture)(const PspGfxTextureRequest* request, PspGfxTextureResult* result);
+    int (*CreateTexture)(const PspGfxTextureRequest* request, PspGfxTextureResult* result);
+    void (*InvalidateRgba16Texture)(const u16* pixels);
+    void (*SetScissor)(float ulx, float uly, float lrx, float lry);
+    void (*ClearScissor)(void);
+    void (*DrawTriangles)(const PspGfxVertex* vertices, u32 vertexCount, const PspGfxDrawState* state);
+    int (*ReserveVertices)(u32 vertexCapacity, PspGfxVertexReservation* reservation);
+    void (*DrawReservedTriangles)(const PspGfxVertexReservation* reservation, u32 vertexCount,
+                                 const PspGfxDrawState* state);
+    void (*DrawFogTriangles)(const PspGfxFogVertex* vertices, u32 vertexCount, const PspGfxFogDrawState* state);
+    void (*DrawSprites)(const PspGfxVertex* vertices, u32 vertexCount, const PspGfxDrawState* state);
+    void (*DrawSolidRect)(float ulx, float uly, float lrx, float lry, u32 color, int blend,
+                          PspGfxViewportPolicy viewport);
+    void (*SetHudAnchor)(s16 x, s16 y);
+    void (*BeginReplayCache)(void);
+    void (*EndReplayCache)(void);
+    int (*ReplayCacheReady)(void);
+    void (*ReplayCacheInvalidate)(void);
+    void (*ReplayCache)(void);
+} PspGfxBackendOps;
+
+extern const PspGfxBackendOps* gPspGfxBackendOps;
+extern PspGfxBackendKind gPspGfxBackendKind;
+
+int PspGfxBackend_Select(PspGfxBackendKind backend);
+void PspGfxBackend_LockSelection(void);
+PspGfxBackendKind PspGfxBackend_GetActive(void);
+PspGfxBackendKind PspGfxBackend_GetBuildDefault(void);
+const char* PspGfxBackend_GetName(void);
+
+static inline int PspGfxBackend_IsGu(void) {
+    return gPspGfxBackendKind == PSP_GFX_KIND_GU;
+}
+
+#if defined(PSP_GFX_BACKEND_DIRECT_CALLS) && PSP_GFX_BACKEND_GU && !PSP_GFX_BACKEND_PSPGL
+#define PSP_GFX_BACKEND_CALL(name, arguments) PspGfxBackendGu_##name arguments
+#elif defined(PSP_GFX_BACKEND_DIRECT_CALLS) && PSP_GFX_BACKEND_PSPGL && !PSP_GFX_BACKEND_GU
+#define PSP_GFX_BACKEND_CALL(name, arguments) PspGfxBackendPspgl_##name arguments
+#elif PSP_GFX_BACKEND_GU && PSP_GFX_BACKEND_PSPGL
+#define PSP_GFX_BACKEND_CALL(name, arguments) gPspGfxBackendOps->name arguments
+#endif
+
+#if defined(PSP_GFX_BACKEND_DIRECT_CALLS) || (PSP_GFX_BACKEND_GU && PSP_GFX_BACKEND_PSPGL)
+#define PspGfxBackend_TextureDebugId(handle) (PSP_GFX_BACKEND_CALL(TextureDebugId, ((handle))))
+#define PspGfxBackend_TextureDebugGeneration(handle) (PSP_GFX_BACKEND_CALL(TextureDebugGeneration, ((handle))))
+#define PspGfxBackend_TextureSupported(request) (PSP_GFX_BACKEND_CALL(TextureSupported, ((request))))
+#define PspGfxBackend_FindTexture(request, result) (PSP_GFX_BACKEND_CALL(FindTexture, ((request), (result))))
+#define PspGfxBackend_CreateTexture(request, result) (PSP_GFX_BACKEND_CALL(CreateTexture, ((request), (result))))
+#define PspGfxBackend_InvalidateRgba16Texture(pixels) \
+    (PSP_GFX_BACKEND_CALL(InvalidateRgba16Texture, ((pixels))))
+#define PspGfxBackend_SetScissor(ulx, uly, lrx, lry) \
+    (PSP_GFX_BACKEND_CALL(SetScissor, ((ulx), (uly), (lrx), (lry))))
+#define PspGfxBackend_ClearScissor() (PSP_GFX_BACKEND_CALL(ClearScissor, ()))
+#define PspGfxBackend_DrawTriangles(vertices, count, state) \
+    (PSP_GFX_BACKEND_CALL(DrawTriangles, ((vertices), (count), (state))))
+#define PspGfxBackend_ReserveVertices(capacity, reservation) \
+    (PSP_GFX_BACKEND_CALL(ReserveVertices, ((capacity), (reservation))))
+#define PspGfxBackend_DrawReservedTriangles(reservation, count, state) \
+    (PSP_GFX_BACKEND_CALL(DrawReservedTriangles, ((reservation), (count), (state))))
+#define PspGfxBackend_DrawFogTriangles(vertices, count, state) \
+    (PSP_GFX_BACKEND_CALL(DrawFogTriangles, ((vertices), (count), (state))))
+#define PspGfxBackend_DrawSprites(vertices, count, state) \
+    (PSP_GFX_BACKEND_CALL(DrawSprites, ((vertices), (count), (state))))
+#define PspGfxBackend_DrawSolidRect(ulx, uly, lrx, lry, color, blend, viewport) \
+    (PSP_GFX_BACKEND_CALL(DrawSolidRect, ((ulx), (uly), (lrx), (lry), (color), (blend), (viewport))))
+#define PspGfxBackend_SetHudAnchor(x, y) (PSP_GFX_BACKEND_CALL(SetHudAnchor, ((x), (y))))
+#define PspGfxBackend_BeginReplayCache() (PSP_GFX_BACKEND_CALL(BeginReplayCache, ()))
+#define PspGfxBackend_EndReplayCache() (PSP_GFX_BACKEND_CALL(EndReplayCache, ()))
+#define PspGfxBackend_ReplayCacheReady() (PSP_GFX_BACKEND_CALL(ReplayCacheReady, ()))
+#define PspGfxBackend_ReplayCacheInvalidate() (PSP_GFX_BACKEND_CALL(ReplayCacheInvalidate, ()))
+#define PspGfxBackend_ReplayCache() (PSP_GFX_BACKEND_CALL(ReplayCache, ()))
+#else
+u32 PspGfxBackend_TextureDebugId(PspGfxTextureHandle handle);
+u32 PspGfxBackend_TextureDebugGeneration(PspGfxTextureHandle handle);
 int PspGfxBackend_TextureSupported(const PspGfxTextureRequest* request);
 int PspGfxBackend_FindTexture(const PspGfxTextureRequest* request, PspGfxTextureResult* result);
 int PspGfxBackend_CreateTexture(const PspGfxTextureRequest* request, PspGfxTextureResult* result);
 void PspGfxBackend_InvalidateRgba16Texture(const u16* pixels);
 void PspGfxBackend_SetScissor(float ulx, float uly, float lrx, float lry);
 void PspGfxBackend_ClearScissor(void);
-
 void PspGfxBackend_DrawTriangles(const PspGfxVertex* vertices, u32 vertexCount, const PspGfxDrawState* state);
-#if PSP_GFX_BACKEND_GU
-// Each allocation starts one model instance shared by the following mesh spans
-PspGfxVertex* PspGfxBackend_AllocateMeshVertices(u32 count, u32 draws);
-void PspGfxBackend_DrawMesh(const PspGfxVertex* vertices, const u16* indices, u32 count,
-                          const PspGfxDrawState* state, const float* modelview, int cullFront, int cullBack);
-void PspGfxBackend_SealMeshIndices(const u16* indices, u32 count);
-#endif
 int PspGfxBackend_ReserveVertices(u32 vertexCapacity, PspGfxVertexReservation* reservation);
 void PspGfxBackend_DrawReservedTriangles(const PspGfxVertexReservation* reservation, u32 vertexCount,
                                          const PspGfxDrawState* state);
-void PspGfxBackend_DrawFogTriangles(const PspGfxFogVertex* vertices, u32 vertexCount, const PspGfxFogDrawState* state);
+void PspGfxBackend_DrawFogTriangles(const PspGfxFogVertex* vertices, u32 vertexCount,
+                                    const PspGfxFogDrawState* state);
 void PspGfxBackend_DrawSprites(const PspGfxVertex* vertices, u32 vertexCount, const PspGfxDrawState* state);
 void PspGfxBackend_DrawSolidRect(float ulx, float uly, float lrx, float lry, u32 color, int blend,
                                  PspGfxViewportPolicy viewport);
@@ -192,5 +271,16 @@ void PspGfxBackend_EndReplayCache(void);
 int PspGfxBackend_ReplayCacheReady(void);
 void PspGfxBackend_ReplayCacheInvalidate(void);
 void PspGfxBackend_ReplayCache(void);
+#endif
+
+#if PSP_GFX_BACKEND_GU
+// Each allocation starts one model instance shared by the following mesh spans
+PspGfxVertex* PspGfxBackendGu_AllocateMeshVertices(u32 count, u32 draws);
+void PspGfxBackendGu_DrawMesh(const PspGfxVertex* vertices, const u16* indices, u32 count,
+                             const PspGfxDrawState* state, const float* modelview, int cullFront, int cullBack);
+void PspGfxBackendGu_SealMeshIndices(const u16* indices, u32 count);
+#endif
+
+#include "src/psp/gfx/gfx_psp_backend_impl.h"
 
 #endif

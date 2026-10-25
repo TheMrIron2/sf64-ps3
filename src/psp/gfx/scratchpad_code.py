@@ -16,7 +16,7 @@ spec.loader.exec_module(assets)
 FUNCTIONS = (
     ('backend', 'psp_gfx_gu_prepare_colored_draw_with_model', 2848),
     ('dl', 'psp_gfx_dl_resolve_effective_material_state', 660),
-    ('dl', 'psp_gfx_dl_prepare_texture.isra.0', 1184),
+    ('dl', 'psp_gfx_dl_prepare_texture.isra.0', None),
 )
 OBJECTS = {'backend': 'src/psp/gfx/gfx_psp_backend_gu.o', 'dl': 'src/psp/gfx/gfx_psp_dl.o'}
 
@@ -65,7 +65,8 @@ def function_code(obj, name):
 def inspect(obj, name, expected_size):
     index = obj[3].index('.text.' + name)
     section, code = contents(obj, '.text.' + name)
-    assert len(code) == expected_size
+    if expected_size is not None:
+        assert len(code) == expected_size
     masks = [0xffffffff] * (len(code) // 4)
     relocs = []
     for target_section, offset, kind, target in relocations(obj):
@@ -76,7 +77,7 @@ def inspect(obj, name, expected_size):
             assert not target.startswith('.text') and target != name, (name, target)
         masks[offset // 4] = 0xfc000000 if kind == 4 else 0xffff0000
         relocs.append(dict(offset=offset, kind=kind, target=target))
-    branches = returns = 0
+    branches = returns = indirect_calls = 0
     words = struct.unpack('<' + 'I' * len(masks), code)
     for i, word in enumerate(words):
         offset = i * 4
@@ -85,15 +86,23 @@ def inspect(obj, name, expected_size):
             assert any(r['offset'] == offset and r['kind'] == 4 and
                        r['target'] not in (name, '.text.' + name) for r in relocs), (name, offset)
         if op == 0 and funct in (8, 9):
-            assert funct == 8 and rs == 31, ('indirect control flow', name, offset)
-            returns += 1
+            if funct == 8:
+                assert rs == 31, ('indirect return', name, offset)
+                returns += 1
+            else:
+                assert name == 'psp_gfx_dl_prepare_texture.isra.0' and rs != 31 and ((word >> 11) & 31) == 31, \
+                    ('unexpected indirect call', name, offset)
+                indirect_calls += 1
         if op == 1:
             assert ((word >> 16) & 31) in (0, 1, 2, 3), ('branch and link', name, offset)
         if op in (1, 4, 5, 6, 7, 20, 21, 22, 23) or (op in (17, 18) and rs == 8):
             delta = struct.unpack('<h', struct.pack('<H', word & 65535))[0] * 4
             assert 0 <= offset + 4 + delta < len(code), ('external branch', name, offset)
             branches += 1
-    return code, words, masks, dict(bytes=len(code), branches=branches, returns=returns, relocations=relocs)
+    if indirect_calls:
+        assert indirect_calls == 3 and sum(r['target'] == 'gPspGfxBackendOps' for r in relocs) >= 3
+    return code, words, masks, dict(bytes=len(code), branches=branches, returns=returns,
+                                    indirect_calls=indirect_calls, relocations=relocs)
 
 
 def prepare(source, output):
@@ -126,21 +135,25 @@ def objects_and_header(build):
     header += 'const unsigned* masks; const unsigned* expected; } ScratchpadCode;\n'
     entries, offset = [], 0
     for i, (key, name, size) in enumerate(FUNCTIONS):
-        _, words, masks, _ = inspect(objects[key], name, size)
+        actual_size = function_code(objects[key], name)[1]
+        if size is None:
+            assert actual_size in (1184, 1212), (name, actual_size)
+        code_size = actual_size if size is None else size
+        _, words, masks, _ = inspect(objects[key], name, code_size)
         header += f'extern const unsigned char PspScratchpad_Original{i}[];\n'
         for suffix, values in (('Masks', masks), ('Expected', [w & m for w, m in zip(words, masks)])):
             header += f'static const unsigned sScratchpad{suffix}{i}[] = {{\n'
             header += ''.join('    ' + ', '.join(f'0x{v:08x}u' for v in values[p:p + 8]) + ',\n'
                               for p in range(0, len(values), 8)) + '};\n'
-        entries.append(f'    {{PspScratchpad_Original{i}, {size}u, {offset + 64}u, sScratchpadMasks{i}, sScratchpadExpected{i}}},\n')
-        offset += ((size + 63) & ~63) + 128
+        entries.append(f'    {{PspScratchpad_Original{i}, {code_size}u, {offset + 64}u, sScratchpadMasks{i}, sScratchpadExpected{i}}},\n')
+        offset += ((code_size + 63) & ~63) + 128
     assert offset == 5184
     header += '#define PSP_SCRATCHPAD_STORAGE 5184u\n'
     header += 'static const ScratchpadCode sScratchpadCode[3] = {\n' + ''.join(entries) + '};\n'
     return objects, header
 
 
-def verify(build, objects):
+def verify(build, objects, layout_plan):
     final = read(build / 'starfox64.psp.elf')
     addresses = {n: a for n, a, _, _ in final[2]}
     assert not any(n.startswith(('ComboProbe_', 'StateProbe_')) for n in addresses)
@@ -153,9 +166,10 @@ def verify(build, objects):
                 destination = ((address + offset + 4) & 0xf0000000) | ((word & 0x03ffffff) << 2)
                 assert destination == addresses[target], (caller, target)
     for i, (key, name, size) in enumerate(FUNCTIONS):
-        _, words, masks, _ = inspect(objects[key], name, size)
+        expected_size = function_code(objects[key], name)[1] if size is None else size
+        _, words, masks, _ = inspect(objects[key], name, expected_size)
         address, actual_size, code = function_code(final, name)
-        assert actual_size == size and addresses[f'PspScratchpad_Original{i}'] == address
+        assert actual_size == expected_size and addresses[f'PspScratchpad_Original{i}'] == address
         linked = struct.unpack('<' + 'I' * len(words), code)
         assert all(a & m == b & m for a, b, m in zip(words, linked, masks))
         _, stub_size, stub = function_code(final, f'PspScratchpad_Dispatch{i}')
@@ -166,21 +180,26 @@ def verify(build, objects):
         assert instructions[2:] == (0x00400008, 0)
         assert ((instructions[0] & 65535) << 16) + struct.unpack_from('<h', stub, 4)[0] == addresses['gPspScratchpadTargets'] + i * 4
     for name in ('BeginFrame', 'Submit', 'Shutdown'):
-        dis = subprocess.check_output(['psp-objdump', '-d', '--disassemble=PspGfxDevice_' + name,
+        dis = subprocess.check_output(['psp-objdump', '-d', '--disassemble=PspGfxDeviceGu_' + name,
                                        str(build / 'starfox64.psp.elf')], text=True)
         assert '<__wrap_PspGfxGuDevice_' + name + '>' in dis, name
-    plan = json.loads((ROOT / 'src/psp/gfx/gfx_psp_layout.json').read_text())
+    dis = subprocess.check_output(['psp-objdump', '-d', '--disassemble=PspGfxDevicePspgl_BeginFrame',
+                                   str(build / 'starfox64.psp.elf')], text=True)
+    assert '__wrap_PspGfxGuDevice_' not in dis and 'PspGfxGuDevice_BeginFrame' not in dis
+    plan = json.loads(layout_plan.read_text())
     pins = [(f['name'], c['address'] + f['offset'], f['size']) for c in plan['chunks'] for f in c['functions']]
     functions = {n: (a, s) for n, a, s, _ in final[2]}
     assert len(pins) == 198 and all(functions[n] == (a, s) for n, a, s in pins)
     assert len(json.loads((build / 'retained_assets.json').read_text())) == 396
-    print('Scratchpad: 4692 code bytes, ten routes, RAM fallback and 198 pins / 396 qualifications verified')
+    code_bytes = sum(function_code(objects[key], name)[1] for key, name, _ in FUNCTIONS)
+    print(f'Scratchpad: {code_bytes} code bytes, ten routes, RAM fallback and 198 pins / 396 qualifications verified')
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('command', choices=('prepare', 'header', 'verify'))
     parser.add_argument('paths', type=Path, nargs='+')
+    parser.add_argument('--layout-plan', type=Path, default=ROOT / 'src/psp/gfx/gfx_psp_layout.json')
     args = parser.parse_args()
     if args.command == 'prepare':
         source, output = args.paths
@@ -194,7 +213,7 @@ def main():
                 target.write_text(header)
         else:
             assert target.read_text() == header, 'rebuild scratchpad image'
-            verify(build, objects)
+            verify(build, objects, args.layout_plan)
 
 
 if __name__ == '__main__':

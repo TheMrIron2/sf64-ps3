@@ -1,4 +1,5 @@
 #include "src/psp/gfx/gfx_psp_backend.h"
+#include "src/psp/gfx/gfx_psp_backend_impl.h"
 
 #include "src/psp/gfx/gfx_pspgl.h"
 
@@ -70,31 +71,31 @@ static void psp_gfx_backend_draw_state(const PspGfxDrawState* state, u32* textur
     *textureRef = psp_gfx_backend_texture_ref(state->texture);
 }
 
-u32 PspGfxBackend_TextureDebugId(PspGfxTextureHandle handle) {
+u32 PspGfxBackendPspgl_TextureDebugId(PspGfxTextureHandle handle) {
     return handle.opaque[0];
 }
 
-u32 PspGfxBackend_TextureDebugGeneration(PspGfxTextureHandle handle) {
+u32 PspGfxBackendPspgl_TextureDebugGeneration(PspGfxTextureHandle handle) {
     return handle.opaque[3];
 }
 
-int PspGfxBackend_TextureSupported(const PspGfxTextureRequest* request) {
+int PspGfxBackendPspgl_TextureSupported(const PspGfxTextureRequest* request) {
     return PspGfxPspgl_TextureSupported(request);
 }
 
-void PspGfxBackend_InvalidateRgba16Texture(const u16* pixels) {
+void PspGfxBackendPspgl_InvalidateRgba16Texture(const u16* pixels) {
     PspGfxPspgl_InvalidateRgba16Texture(pixels);
 }
 
-void PspGfxBackend_SetScissor(float ulx, float uly, float lrx, float lry) {
+void PspGfxBackendPspgl_SetScissor(float ulx, float uly, float lrx, float lry) {
     PspGfxPspgl_SetScissor(ulx, uly, lrx, lry);
 }
 
-void PspGfxBackend_ClearScissor(void) {
+void PspGfxBackendPspgl_ClearScissor(void) {
     PspGfxPspgl_ClearScissor();
 }
 
-int PspGfxBackend_FindTexture(const PspGfxTextureRequest* request, PspGfxTextureResult* result) {
+int PspGfxBackendPspgl_FindTexture(const PspGfxTextureRequest* request, PspGfxTextureResult* result) {
     PspGfxPspglTextureRef textureRef = { 0 };
     u32 textureId = 0;
 
@@ -109,7 +110,7 @@ int PspGfxBackend_FindTexture(const PspGfxTextureRequest* request, PspGfxTexture
     return 1;
 }
 
-int PspGfxBackend_CreateTexture(const PspGfxTextureRequest* request, PspGfxTextureResult* result) {
+int PspGfxBackendPspgl_CreateTexture(const PspGfxTextureRequest* request, PspGfxTextureResult* result) {
     PspGfxPspglTextureRef textureRef = { 0 };
     u32 textureId;
 
@@ -121,7 +122,7 @@ int PspGfxBackend_CreateTexture(const PspGfxTextureRequest* request, PspGfxTextu
     return textureId != 0;
 }
 
-void PspGfxBackend_DrawTriangles(const PspGfxVertex* vertices, u32 vertexCount, const PspGfxDrawState* state) {
+void PspGfxBackendPspgl_DrawTriangles(const PspGfxVertex* vertices, u32 vertexCount, const PspGfxDrawState* state) {
     PspGfxPspglTextureRef textureRef = { 0 };
     u32 textureId;
 
@@ -134,7 +135,7 @@ void PspGfxBackend_DrawTriangles(const PspGfxVertex* vertices, u32 vertexCount, 
         state->pretransformed, state->pointFilter, state->viewport);
 }
 
-int PspGfxBackend_ReserveVertices(u32 vertexCapacity, PspGfxVertexReservation* reservation) {
+int PspGfxBackendPspgl_ReserveVertices(u32 vertexCapacity, PspGfxVertexReservation* reservation) {
     PspGfxPspglVertexReservation pspglReservation;
 
     if (!PspGfxPspgl_ReserveColoredVertices(vertexCapacity, &pspglReservation)) {
@@ -146,7 +147,7 @@ int PspGfxBackend_ReserveVertices(u32 vertexCapacity, PspGfxVertexReservation* r
     return 1;
 }
 
-void PspGfxBackend_DrawReservedTriangles(const PspGfxVertexReservation* reservation, u32 vertexCount,
+void PspGfxBackendPspgl_DrawReservedTriangles(const PspGfxVertexReservation* reservation, u32 vertexCount,
                                          const PspGfxDrawState* state) {
     PspGfxPspglVertexReservation pspglReservation = psp_gfx_backend_reservation(reservation);
     PspGfxPspglTextureRef textureRef = { 0 };
@@ -161,12 +162,12 @@ void PspGfxBackend_DrawReservedTriangles(const PspGfxVertexReservation* reservat
         state->pretransformed, state->pointFilter, state->viewport);
 }
 
-void PspGfxBackend_DrawFogTriangles(const PspGfxFogVertex* vertices, u32 vertexCount, const PspGfxFogDrawState* state) {
+void PspGfxBackendPspgl_DrawFogTriangles(const PspGfxFogVertex* vertices, u32 vertexCount, const PspGfxFogDrawState* state) {
     PspGfxPspgl_DrawFogTriangles(vertices, vertexCount, state->projectionMatrix, state->projectionSerial,
                                  state->pretransformed, state->depthTest, state->viewport);
 }
 
-void PspGfxBackend_DrawSprites(const PspGfxVertex* vertices, u32 vertexCount, const PspGfxDrawState* state) {
+void PspGfxBackendPspgl_DrawSprites(const PspGfxVertex* vertices, u32 vertexCount, const PspGfxDrawState* state) {
     PspGfxPspglTextureRef textureRef = { 0 };
     u32 textureId;
 
@@ -179,31 +180,31 @@ void PspGfxBackend_DrawSprites(const PspGfxVertex* vertices, u32 vertexCount, co
         state->pretransformed, state->pointFilter, state->viewport);
 }
 
-void PspGfxBackend_DrawSolidRect(float ulx, float uly, float lrx, float lry, u32 color, int blend,
+void PspGfxBackendPspgl_DrawSolidRect(float ulx, float uly, float lrx, float lry, u32 color, int blend,
                                  PspGfxViewportPolicy viewport) {
     PspGfxPspgl_DrawSolidRect(ulx, uly, lrx, lry, color, blend, viewport);
 }
 
-void PspGfxBackend_SetHudAnchor(s16 x, s16 y) {
+void PspGfxBackendPspgl_SetHudAnchor(s16 x, s16 y) {
     PspGfxPspgl_SetHudAnchor(x, y);
 }
 
-void PspGfxBackend_BeginReplayCache(void) {
+void PspGfxBackendPspgl_BeginReplayCache(void) {
     PspGfxPspgl_BeginReplayCache();
 }
 
-void PspGfxBackend_EndReplayCache(void) {
+void PspGfxBackendPspgl_EndReplayCache(void) {
     PspGfxPspgl_EndReplayCache();
 }
 
-int PspGfxBackend_ReplayCacheReady(void) {
+int PspGfxBackendPspgl_ReplayCacheReady(void) {
     return PspGfxPspgl_ReplayCacheReady();
 }
 
-void PspGfxBackend_ReplayCacheInvalidate(void) {
+void PspGfxBackendPspgl_ReplayCacheInvalidate(void) {
     PspGfxPspgl_ReplayCacheInvalidate();
 }
 
-void PspGfxBackend_ReplayCache(void) {
+void PspGfxBackendPspgl_ReplayCache(void) {
     PspGfxPspgl_ReplayCache();
 }

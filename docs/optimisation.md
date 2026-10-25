@@ -1016,3 +1016,25 @@ mixer and invalidates it on ME before execution; ME-to-CPU handover invalidates
 the CPU copy. PCM queues stay shared. A timed-out ME still running must block
 synthesis and buffer reuse even if its pending-job flag has already cleared.
 Off and blocked handovers wait on VI because no PCM backpressure can pace them.
+
+## Unified PSP graphics backend
+
+The normal PSP build is one EBOOT containing the GU and PSPGL backends. The
+SELECT settings overlay saves `sf64-settings.cfg` beside the EBOOT and applies
+the chosen backend only at the next launch; missing or invalid settings default
+to GU. The startup dispatcher binds one backend before graphics initialization,
+and device initialization touches only that backend. Audio mode remains a
+separate live setting.
+
+`make psp` builds the unified EBOOT. `PSP_GFX_BACKEND=gu` and
+`PSP_GFX_BACKEND=pspgl` remain useful for standalone builds. In the unified
+build, Fast3D calls use the selected operations table; draw submission remains
+batched, while individual texture and draw-state operations add an indirect
+call. The PSP build validates the production placement plan, retained-mesh
+qualification, and GU scratchpad relocation with both implementations linked.
+The unified plan grows the `PspGfxDl_Run` slot from 704 to 768 bytes and moves
+later pinned functions by 64 bytes. The standalone GU plan also grows the
+direct-call MTX handler slot from 1408 to 1472 bytes for its 1424-byte function;
+its pinned end moves 128 bytes from the original GU plan. Hardware A/B timing
+and PSP-1000 heap measurements are still required before claiming GU
+performance parity.

@@ -1,4 +1,5 @@
 #include "src/psp/hw_counter_profile.h"
+#include "src/psp/gfx/gfx_psp_backend.h"
 #include "src/psp/texture_attribution.h"
 
 #if PROFILE_HW_COUNTERS
@@ -31,9 +32,6 @@
 #endif
 #ifndef PSPGL_SOURCE_MODE
 #define PSPGL_SOURCE_MODE "unknown"
-#endif
-#ifndef PSP_GFX_BACKEND_NAME
-#define PSP_GFX_BACKEND_NAME "unknown"
 #endif
 #ifndef BUILD_COMPILER
 #define BUILD_COMPILER "unknown"
@@ -486,7 +484,7 @@ static int psp_hw_dump_metadata(SceUID fd) {
              "n64psp_commit,%s\n"
              "n64psp_tree,%s\n"
              "renderer_backend,%s\n",
-             SF64_GIT_SHA, SF64_GIT_DIRTY, N64PSP_GIT_SHA, N64PSP_GIT_DIRTY, PSP_GFX_BACKEND_NAME);
+             SF64_GIT_SHA, SF64_GIT_DIRTY, N64PSP_GIT_SHA, N64PSP_GIT_DIRTY, PspGfxBackend_GetName());
     if (!psp_hw_write_all(fd, line)) {
         return 0;
     }

@@ -46,12 +46,16 @@ static int sHardware = PROFILE_HW_COUNTERS && !(PROFILE_GPROF || PROFILE_PHASES)
 #endif
 static PspMenuView sView;
 
+static const char* menu_backend_name(PspGfxBackendKind backend) {
+    return backend == PSP_GFX_KIND_GU ? "GU" : "PSPGL";
+}
+
 static int menu_rows(void) {
     if (sScreen == MENU_MAIN) return 3 + !!PSP_MENU_DIAGNOSTICS;
-    if (sScreen == MENU_GRAPHICS) return 2 + !!PSP_FPS_OVERLAY;
+    if (sScreen == MENU_GRAPHICS) return 2 + !!PSP_FPS_OVERLAY + PSP_GFX_BACKEND_SELECTABLE;
     if (sScreen == MENU_SETTINGS) return 2;
     if (sScreen == MENU_DIAGNOSTICS) {
-        return 1 + (PSP_MENU_CAPTURES ? 3 : 0) + !!PROFILE_HW_COUNTERS +
+        return 2 + (PSP_MENU_CAPTURES ? 3 : 0) + !!PROFILE_HW_COUNTERS +
                !!PSP_RENDERER_DIAGNOSTICS + !!(PSP_NATIVE_COVERAGE_AB && !PSP_GFX_BACKEND_GU);
     }
     return 1;
@@ -105,13 +109,18 @@ void PspMenu_Update(u32 pressed) {
             PspSettings_SetDisplayMode((mode + direction + N64PSP_DISPLAY_PSP_MODE_COUNT) % N64PSP_DISPLAY_PSP_MODE_COUNT);
         } else if (sSelected == 1) {
             PspSettings_SetPresentationHz(PspFrameScheduler_GetPresentationVIs() == 1 ? 30 : 60);
-#if PSP_FPS_OVERLAY
+#if PSP_GFX_BACKEND_SELECTABLE
         } else if (sSelected == 2) {
+            PspGfxBackendKind backend = PspSettings_GetGraphicsBackend();
+            PspSettings_SetGraphicsBackend(backend == PSP_GFX_KIND_GU ? PSP_GFX_KIND_PSPGL : PSP_GFX_KIND_GU);
+#endif
+#if PSP_FPS_OVERLAY
+        } else if (sSelected == (2 + PSP_GFX_BACKEND_SELECTABLE)) {
             PspSettings_TogglePerformance();
 #endif
         }
     } else if (sScreen == MENU_DIAGNOSTICS) {
-        row = 0;
+        row = 1;
 #if PSP_MENU_CAPTURES
         if (sSelected == row++) sAction = ACTION_TYPE;
         else if (sSelected == row++ && activate) sAction = ACTION_START;
@@ -238,11 +247,24 @@ void PspMenu_Publish(void) {
         static const char* const modes[] = { "Original", "4:3", "16:9" };
         ROW("Aspect: <%s>", modes[mode]);
         ROW("Presentation: <%d Hz>", 60 / vis);
+#if PSP_GFX_BACKEND_SELECTABLE
+        ROW("Graphics Backend: <%s>", menu_backend_name(PspSettings_GetGraphicsBackend()));
+        if (PspSettings_GraphicsBackendSaveFailed()) {
+            snprintf(view.status, MENU_TEXT, "Active %s; Save failed",
+                     menu_backend_name(PspSettings_GetActiveGraphicsBackend()));
+        } else if (PspSettings_GetGraphicsBackend() != PspSettings_GetActiveGraphicsBackend()) {
+            snprintf(view.status, MENU_TEXT, "Active %s; Restart required",
+                     menu_backend_name(PspSettings_GetActiveGraphicsBackend()));
+        } else {
+            snprintf(view.status, MENU_TEXT, "Active %s", menu_backend_name(PspSettings_GetActiveGraphicsBackend()));
+        }
+#endif
 #if PSP_FPS_OVERLAY
         ROW("Performance overlay: %s", PspSettings_PerformanceVisible() ? "On" : "Off");
 #endif
     } else if (sScreen == MENU_DIAGNOSTICS) {
         snprintf(view.title, MENU_TEXT, "%s", "Performance / Diagnostics");
+        ROW("Active backend: %s", menu_backend_name(PspSettings_GetActiveGraphicsBackend()));
 #if PSP_MENU_CAPTURES
         ROW("Capture: %s", sHardware ? "Hardware counters" : "Phase / gprof");
         ROW("Start capture"); ROW("Stop and save capture");

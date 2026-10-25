@@ -15,6 +15,7 @@
 #include "src/psp/overlay.h"
 
 #include <pspkernel.h>
+#include <pspdebug.h>
 #include <stdint.h>
 // <string.h> drags in <strings.h>, which conflicts with PR/os_libc.h via sf64thread.h
 
@@ -42,6 +43,8 @@ static u32 sPerfSkipped;
 static int sPerfReady;
 
 #endif
+
+static int sRendererInitAttempted;
 
 static int psp_renderer_draw_overlays(int menuFrame) {
     char text[96];
@@ -161,19 +164,25 @@ void PspRenderer_RecordSimulationTicks(u32 ticks) {
 }
 
 void PspRenderer_Init(void) {
+    char message[96];
+
     if (PspGfxDevice_IsReady()) {
         return;
     }
+    if (sRendererInitAttempted) return;
+    sRendererInitAttempted = 1;
 
     if (!PspDisplay_Init() || !PspGfxDevice_Init()) {
+        snprintf(message, sizeof(message), "[psp] %s graphics initialization failed", PspGfxBackend_GetName());
+        PspPlatform_LogLine(message);
+        pspDebugScreenSetXY(0, 6);
+        pspDebugScreenPrintf("Graphics backend %s failed to initialize\n", PspGfxBackend_GetName());
+        pspDebugScreenPrintf("Use HOME to exit, then select another backend\n");
         return;
     }
 
-#if PSP_GFX_BACKEND_PSPGL
-    PspPlatform_LogLine("[pspgl] renderer init");
-#else
-    PspPlatform_LogLine("[gu] renderer init");
-#endif
+    snprintf(message, sizeof(message), "[psp] %s renderer init", PspGfxBackend_GetName());
+    PspPlatform_LogLine(message);
     PspGfxDevice_BeginFrame();
     PspGfxDevice_Submit();
     PspGfxDevice_Present();
@@ -234,7 +243,7 @@ int PspRenderer_RenderGfxTask(SPTask* task, u32 taskIndex) {
         }
         PspFrameInterpolation_FinishPresentation(task);
 #if PSP_GFX_BACKEND_GU
-        if (PspMenu_Visible()) menuDrawn = psp_renderer_draw_overlays(1);
+        if (PspGfxBackend_IsGu() && PspMenu_Visible()) menuDrawn = psp_renderer_draw_overlays(1);
 #endif
 
         PspHwCounterProfile_ScopeEnd(PSP_HW_SCOPE_FRONTEND);
@@ -248,7 +257,7 @@ int PspRenderer_RenderGfxTask(SPTask* task, u32 taskIndex) {
     #endif
 
 #if PSP_GFX_BACKEND_GU
-        if (!menuDrawn) psp_renderer_draw_overlays(0);
+        if (!PspGfxBackend_IsGu() || !menuDrawn) psp_renderer_draw_overlays(0);
 #else
         psp_renderer_draw_overlays(0);
 #endif

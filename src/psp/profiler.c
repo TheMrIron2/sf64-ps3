@@ -1,4 +1,5 @@
 #include "src/psp/profiler.h"
+#include "src/psp/gfx/gfx_psp_backend.h"
 
 #if PROFILE_COMPONENTS
 #include "src/psp/render_component.h"
@@ -58,9 +59,6 @@ extern int gDrawMode;
 #endif
 #ifndef PSPGL_SOURCE_MODE
 #define PSPGL_SOURCE_MODE "system"
-#endif
-#ifndef PSP_GFX_BACKEND_NAME
-#define PSP_GFX_BACKEND_NAME "unknown"
 #endif
 #ifndef BUILD_COMPILER
 #define BUILD_COMPILER "unknown"
@@ -1842,7 +1840,7 @@ static void psp_profiler_write_phase_files(u32 slot) {
 
     snprintf(line, sizeof(line),
              "SF64 git SHA: %s\nn64psp submodule SHA: %s\nrenderer backend: %s\nPSPGL source mode: %s\nPSPGL git SHA: %s\nPSPGL worktree: %s\ncompiler: %s\noptimisation flags: %s\nPROFILE_PSP: %d\nPROFILE_PHASES: %d\nPROFILE_TRIVIAL_REJECTS: %d\nCPU clock: %lu\nbus clock: %lu\ncapture slot: %lu\nrequested frame count: %d\nactual frame count: %lu\ntimer overhead us: %llu\n\n",
-             SF64_GIT_SHA, N64PSP_GIT_SHA, PSP_GFX_BACKEND_NAME, PSPGL_SOURCE_MODE, PSPGL_GIT_SHA, PSPGL_GIT_DIRTY,
+             SF64_GIT_SHA, N64PSP_GIT_SHA, PspGfxBackend_GetName(), PSPGL_SOURCE_MODE, PSPGL_GIT_SHA, PSPGL_GIT_DIRTY,
              BUILD_COMPILER, BUILD_OPT_FLAGS,
              PROFILE_GPROF, PROFILE_PHASES, PROFILE_TRIVIAL_REJECTS,
              (unsigned long) scePowerGetCpuClockFrequency(),

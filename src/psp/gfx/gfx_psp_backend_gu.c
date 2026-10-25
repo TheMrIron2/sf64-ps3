@@ -1,6 +1,7 @@
 #include <n64psp/display.h>
 
 #include "src/psp/gfx/gfx_psp_backend.h"
+#include "src/psp/gfx/gfx_psp_backend_impl.h"
 #include "src/psp/gfx/gfx_psp_backend_gu.h"
 #include "src/psp/display.h"
 #include "src/psp/gfx/gfx_psp_gu_texture.h"
@@ -295,11 +296,11 @@ static int psp_gfx_gu_replay_textures_valid(void) {
 }
 
 static void psp_gfx_gu_replay_restore_context(const PspGfxGuReplayPacket* packet) {
-    PspGfxBackend_SetHudAnchor(packet->hudAnchorX, packet->hudAnchorY);
+    PspGfxBackendGu_SetHudAnchor(packet->hudAnchorX, packet->hudAnchorY);
     if (packet->scissorEnabled) {
-        PspGfxBackend_SetScissor(packet->scissorUlx, packet->scissorUly, packet->scissorLrx, packet->scissorLry);
+        PspGfxBackendGu_SetScissor(packet->scissorUlx, packet->scissorUly, packet->scissorLrx, packet->scissorLry);
     } else {
-        PspGfxBackend_ClearScissor();
+        PspGfxBackendGu_ClearScissor();
     }
 }
 
@@ -697,31 +698,31 @@ static int psp_gfx_gu_prepare_colored_draw(const PspGfxDrawState* state) {
     return psp_gfx_gu_prepare_colored_draw_with_model(state, NULL);
 }
 
-u32 PspGfxBackend_TextureDebugId(PspGfxTextureHandle handle) {
+u32 PspGfxBackendGu_TextureDebugId(PspGfxTextureHandle handle) {
     return handle.opaque[0];
 }
 
-u32 PspGfxBackend_TextureDebugGeneration(PspGfxTextureHandle handle) {
+u32 PspGfxBackendGu_TextureDebugGeneration(PspGfxTextureHandle handle) {
     return handle.opaque[3];
 }
 
-int PspGfxBackend_TextureSupported(const PspGfxTextureRequest* request) {
+int PspGfxBackendGu_TextureSupported(const PspGfxTextureRequest* request) {
     return PspGfxGuTexture_Supported(request);
 }
 
-int PspGfxBackend_FindTexture(const PspGfxTextureRequest* request, PspGfxTextureResult* result) {
+int PspGfxBackendGu_FindTexture(const PspGfxTextureRequest* request, PspGfxTextureResult* result) {
     return PspGfxGuTexture_Find(request, result);
 }
 
-int PspGfxBackend_CreateTexture(const PspGfxTextureRequest* request, PspGfxTextureResult* result) {
+int PspGfxBackendGu_CreateTexture(const PspGfxTextureRequest* request, PspGfxTextureResult* result) {
     return PspGfxGuTexture_Create(request, result);
 }
 
-void PspGfxBackend_InvalidateRgba16Texture(const u16* pixels) {
+void PspGfxBackendGu_InvalidateRgba16Texture(const u16* pixels) {
     PspGfxGuTexture_InvalidateRgba16(pixels);
 }
 
-void PspGfxBackend_SetScissor(float ulx, float uly, float lrx, float lry) {
+void PspGfxBackendGu_SetScissor(float ulx, float uly, float lrx, float lry) {
     const n64psp_display_config* display = PspDisplay_GetConfig();
     float scaleX = (float) display->viewport_width / PSP_GFX_GU_N64_WIDTH;
     float scaleY = (float) display->viewport_height / PSP_GFX_GU_N64_HEIGHT;
@@ -757,12 +758,12 @@ void PspGfxBackend_SetScissor(float ulx, float uly, float lrx, float lry) {
     sceGuEnable(GU_SCISSOR_TEST);
 }
 
-void PspGfxBackend_ClearScissor(void) {
+void PspGfxBackendGu_ClearScissor(void) {
     sPspGfxGuScissorEnabled = 0;
     sceGuDisable(GU_SCISSOR_TEST);
 }
 
-void PspGfxBackend_DrawTriangles(const PspGfxVertex* vertices, u32 vertexCount, const PspGfxDrawState* state) {
+void PspGfxBackendGu_DrawTriangles(const PspGfxVertex* vertices, u32 vertexCount, const PspGfxDrawState* state) {
     void* guVertices;
     u32 drawFlags;
     u32 vertexSize;
@@ -830,7 +831,7 @@ void PspGfxBackend_DrawTriangles(const PspGfxVertex* vertices, u32 vertexCount, 
 }
 
 #if PSP_GFX_BACKEND_GU
-PspGfxVertex* PspGfxBackend_AllocateMeshVertices(u32 count, u32 draws) {
+PspGfxVertex* PspGfxBackendGu_AllocateMeshVertices(u32 count, u32 draws) {
     int used = sceGuCheckList();
     u32 available;
     if (!sPspGfxGuReservationFrameActive || used < 0 || (u32) used > PSP_GFX_GU_LIST_BYTES) return NULL;
@@ -842,11 +843,11 @@ PspGfxVertex* PspGfxBackend_AllocateMeshVertices(u32 count, u32 draws) {
     return (PspGfxVertex*) psp_gfx_gu_alloc_vertices(count, sizeof(PspGfxVertex));
 }
 
-void PspGfxBackend_SealMeshIndices(const u16* indices, u32 count) {
+void PspGfxBackendGu_SealMeshIndices(const u16* indices, u32 count) {
     sceKernelDcacheWritebackRange(indices, count * sizeof(u16));
 }
 
-void PspGfxBackend_DrawMesh(const PspGfxVertex* vertices, const u16* indices, u32 count,
+void PspGfxBackendGu_DrawMesh(const PspGfxVertex* vertices, const u16* indices, u32 count,
                           const PspGfxDrawState* state, const float* modelview, int cullFront, int cullBack) {
     if (!vertices || !indices || !count || count % 3 || !modelview || !state || (cullFront && cullBack)) return;
     if (sPspGfxGuReplayCapturing) psp_gfx_gu_replay_capture_failed();
@@ -860,7 +861,7 @@ void PspGfxBackend_DrawMesh(const PspGfxVertex* vertices, const u16* indices, u3
 }
 #endif
 
-int PspGfxBackend_ReserveVertices(u32 vertexCapacity, PspGfxVertexReservation* reservation) {
+int PspGfxBackendGu_ReserveVertices(u32 vertexCapacity, PspGfxVertexReservation* reservation) {
     PspGfxGuReservation* guReservation = NULL;
     PspGfxVertex* vertices;
     u32 i;
@@ -904,7 +905,7 @@ int PspGfxBackend_ReserveVertices(u32 vertexCapacity, PspGfxVertexReservation* r
     return 1;
 }
 
-void PspGfxBackend_DrawReservedTriangles(const PspGfxVertexReservation* reservation, u32 vertexCount,
+void PspGfxBackendGu_DrawReservedTriangles(const PspGfxVertexReservation* reservation, u32 vertexCount,
                                          const PspGfxDrawState* state) {
     PspGfxGuReservation* guReservation;
     u32 i;
@@ -949,7 +950,7 @@ void PspGfxBackend_DrawReservedTriangles(const PspGfxVertexReservation* reservat
     guReservation->active = 0;
 }
 
-void PspGfxBackend_DrawFogTriangles(const PspGfxFogVertex* vertices, u32 vertexCount,
+void PspGfxBackendGu_DrawFogTriangles(const PspGfxFogVertex* vertices, u32 vertexCount,
                                     const PspGfxFogDrawState* state) {
     PspGfxGuColorVertex* guVertices;
     u32 bytes;
@@ -1017,7 +1018,7 @@ void PspGfxBackend_DrawFogTriangles(const PspGfxFogVertex* vertices, u32 vertexC
     psp_gfx_gu_count_vertex_copy(bytes);
 }
 
-void PspGfxBackend_DrawSprites(const PspGfxVertex* vertices, u32 vertexCount, const PspGfxDrawState* state) {
+void PspGfxBackendGu_DrawSprites(const PspGfxVertex* vertices, u32 vertexCount, const PspGfxDrawState* state) {
     void* guVertices;
     u32 drawFlags;
     u32 vertexSize;
@@ -1083,7 +1084,7 @@ void PspGfxBackend_DrawSprites(const PspGfxVertex* vertices, u32 vertexCount, co
     psp_gfx_gu_count_vertex_copy(bytes);
 }
 
-void PspGfxBackend_DrawSolidRect(float ulx, float uly, float lrx, float lry, u32 color, int blend,
+void PspGfxBackendGu_DrawSolidRect(float ulx, float uly, float lrx, float lry, u32 color, int blend,
                                  PspGfxViewportPolicy viewport) {
     PspGfxGuColorVertex source[6] __attribute__((aligned(16)));
     PspGfxGuColorVertex* vertices;
@@ -1161,36 +1162,36 @@ void PspGfxBackend_DrawSolidRect(float ulx, float uly, float lrx, float lry, u32
     psp_gfx_gu_count_vertex_copy(6 * sizeof(PspGfxGuColorVertex));
 }
 
-void PspGfxBackend_SetHudAnchor(s16 x, s16 y) {
+void PspGfxBackendGu_SetHudAnchor(s16 x, s16 y) {
     sPspGfxGuHudAnchorX = x;
     sPspGfxGuHudAnchorY = y;
 }
 
-void PspGfxBackend_BeginReplayCache(void) {
+void PspGfxBackendGu_BeginReplayCache(void) {
     psp_gfx_gu_replay_clear();
     sPspGfxGuReplayCapturing = 1;
 }
 
-void PspGfxBackend_EndReplayCache(void) {
+void PspGfxBackendGu_EndReplayCache(void) {
     sPspGfxGuReplayCapturing = 0;
     sPspGfxGuReplayReady = !sPspGfxGuReplayCaptureFailed && (sPspGfxGuReplayPacketCount != 0);
 }
 
-int PspGfxBackend_ReplayCacheReady(void) {
+int PspGfxBackendGu_ReplayCacheReady(void) {
     if (sPspGfxGuReplayReady && !psp_gfx_gu_replay_textures_valid()) {
-        PspGfxBackend_ReplayCacheInvalidate();
+        PspGfxBackendGu_ReplayCacheInvalidate();
     }
     return sPspGfxGuReplayReady;
 }
 
-void PspGfxBackend_ReplayCacheInvalidate(void) {
+void PspGfxBackendGu_ReplayCacheInvalidate(void) {
     psp_gfx_gu_replay_clear();
 }
 
-void PspGfxBackend_ReplayCache(void) {
+void PspGfxBackendGu_ReplayCache(void) {
     u32 i;
 
-    if (!PspGfxBackend_ReplayCacheReady()) {
+    if (!PspGfxBackendGu_ReplayCacheReady()) {
         return;
     }
     sPspGfxGuReplayActive = 1;
@@ -1200,17 +1201,17 @@ void PspGfxBackend_ReplayCache(void) {
         psp_gfx_gu_replay_restore_context(packet);
         switch (packet->type) {
             case PSP_GFX_GU_REPLAY_TRIANGLES:
-                PspGfxBackend_DrawTriangles(&sPspGfxGuReplayVertices[packet->first], packet->count, &packet->state);
+                PspGfxBackendGu_DrawTriangles(&sPspGfxGuReplayVertices[packet->first], packet->count, &packet->state);
                 break;
             case PSP_GFX_GU_REPLAY_SPRITES:
-                PspGfxBackend_DrawSprites(&sPspGfxGuReplayVertices[packet->first], packet->count, &packet->state);
+                PspGfxBackendGu_DrawSprites(&sPspGfxGuReplayVertices[packet->first], packet->count, &packet->state);
                 break;
             case PSP_GFX_GU_REPLAY_SOLID_RECT:
-                PspGfxBackend_DrawSolidRect(packet->ulx, packet->uly, packet->lrx, packet->lry, packet->color,
+                PspGfxBackendGu_DrawSolidRect(packet->ulx, packet->uly, packet->lrx, packet->lry, packet->color,
                                             packet->blend, packet->viewport);
                 break;
             case PSP_GFX_GU_REPLAY_FOG:
-                PspGfxBackend_DrawFogTriangles(&sPspGfxGuReplayFogVertices[packet->first], packet->count,
+                PspGfxBackendGu_DrawFogTriangles(&sPspGfxGuReplayFogVertices[packet->first], packet->count,
                                                &packet->fogState);
                 break;
         }

@@ -3,7 +3,7 @@
 #include "src/psp/gfx/gfx_pspgl.h"
 #include "src/psp/gfx/gfx_pspgl_device.h"
 
-int PspGfxDevice_Init(void) {
+int PspGfxDevicePspgl_Init(void) {
     if (!PspGfxPspglDevice_Init()) {
         return 0;
     }
@@ -12,12 +12,12 @@ int PspGfxDevice_Init(void) {
     return 1;
 }
 
-int PspGfxDevice_IsReady(void) {
+int PspGfxDevicePspgl_IsReady(void) {
     return PspGfxPspglDevice_IsReady();
 }
 
-int PspGfxDevice_BeginFrame(void) {
-    if (!PspGfxDevice_IsReady()) {
+int PspGfxDevicePspgl_BeginFrame(void) {
+    if (!PspGfxDevicePspgl_IsReady()) {
         return 0;
     }
 
@@ -26,8 +26,8 @@ int PspGfxDevice_BeginFrame(void) {
     return 1;
 }
 
-int PspGfxDevice_Submit(void) {
-    if (!PspGfxDevice_IsReady()) {
+int PspGfxDevicePspgl_Submit(void) {
+    if (!PspGfxDevicePspgl_IsReady()) {
         return 0;
     }
 
@@ -35,18 +35,18 @@ int PspGfxDevice_Submit(void) {
     return 1;
 }
 
-int PspGfxDevice_Present(void) {
-    if (!PspGfxDevice_IsReady()) {
+int PspGfxDevicePspgl_Present(void) {
+    if (!PspGfxDevicePspgl_IsReady()) {
         return 0;
     }
 
     return PspGfxPspglDevice_EndFrame();
 }
 
-void PspGfxDevice_Shutdown(void) {
+void PspGfxDevicePspgl_Shutdown(void) {
     PspGfxPspglDevice_Shutdown();
 }
 
-void* PspGfxDevice_GetOverlayFrameBuffer(int* stride, int* pixelFormat) {
+void* PspGfxDevicePspgl_GetOverlayFrameBuffer(int* stride, int* pixelFormat) {
     return PspGfxPspglDevice_GetPresentedFrameBuffer(stride, pixelFormat);
 }

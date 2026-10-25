@@ -27,19 +27,23 @@ PSP_RENDERER_C_FILES := \
     src/psp/settings.c \
     src/psp/menu.c \
     src/psp/overlay.c \
+    src/psp/gfx/gfx_psp_backend_dispatch.c \
+    src/psp/gfx/gfx_psp_device_dispatch.c \
     src/psp/gfx/gfx_psp_color.c \
     src/psp/gfx/gfx_psp_seams.c \
     src/psp/gfx/gfx_psp_dl.c \
     src/psp/renderer_starfield.c \
     src/psp/renderer_bridge.c
 
-ifeq ($(PSP_GFX_BACKEND),pspgl)
+ifneq ($(PSP_GFX_HAS_PSPGL),0)
 PSP_RENDERER_C_FILES += \
     src/psp/gfx/gfx_psp_backend_pspgl.c \
     src/psp/gfx/gfx_psp_device_pspgl.c \
     src/psp/gfx/gfx_pspgl.c \
     src/psp/gfx/gfx_pspgl_device.c
-else ifeq ($(PSP_GFX_BACKEND),gu)
+endif
+
+ifneq ($(PSP_GFX_HAS_GU),0)
 PSP_RENDERER_C_FILES += \
     src/psp/overlay_gu.c \
     src/psp/gfx/gfx_psp_backend_gu.c \

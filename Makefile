@@ -18,14 +18,15 @@ MAKEFLAGS += --no-builtin-rules --no-print-directory
 TARGET := starfox64
 VERSION ?= us
 REV ?= rev1
-PSP_GFX_BACKEND ?= pspgl
-ifneq ($(filter pspgl gu,$(PSP_GFX_BACKEND)),$(PSP_GFX_BACKEND))
-$(error PSP_GFX_BACKEND must be pspgl or gu)
+PSP_GFX_BACKEND ?= unified
+ifneq ($(filter unified pspgl gu,$(PSP_GFX_BACKEND)),$(PSP_GFX_BACKEND))
+$(error PSP_GFX_BACKEND must be unified, pspgl or gu)
 endif
-ifeq ($(PSP_GFX_BACKEND),pspgl)
-PSP_GFX_BACKEND_CFLAGS := -DPSP_GFX_BACKEND_PSPGL=1 -DPSP_GFX_BACKEND_GU=0
-else
-PSP_GFX_BACKEND_CFLAGS := -DPSP_GFX_BACKEND_PSPGL=0 -DPSP_GFX_BACKEND_GU=1
+PSP_GFX_HAS_GU := $(if $(filter gu unified,$(PSP_GFX_BACKEND)),1,0)
+PSP_GFX_HAS_PSPGL := $(if $(filter pspgl unified,$(PSP_GFX_BACKEND)),1,0)
+PSP_GFX_BACKEND_CFLAGS := -DPSP_GFX_BACKEND_PSPGL=$(PSP_GFX_HAS_PSPGL) -DPSP_GFX_BACKEND_GU=$(PSP_GFX_HAS_GU)
+ifneq ($(PSP_GFX_BACKEND),unified)
+PSP_GFX_BACKEND_CFLAGS += -DPSP_GFX_BACKEND_DIRECT_CALLS=1
 endif
 PSP_FULL ?= 1
 PROFILE_PSP ?= 0
@@ -194,7 +195,7 @@ PORT_DEFINES += -DNON_MATCHING -DAVOID_UB -DCOMPILER_GCC
 
 IINC := -Iinclude -Ibin/$(VERSION).$(REV) -I.
 IINC += -Ilib/ultralib/include -Ilib/ultralib/include/PR -Ilib/ultralib/include/ido
-ifeq ($(PSP_GFX_BACKEND),pspgl)
+ifeq ($(PSP_GFX_HAS_PSPGL),1)
 ifeq ($(USE_LOCAL_PSPGL),1)
 IINC += -I$(PSPGL_DIR)
 endif
@@ -216,7 +217,7 @@ SF64_GIT_SHA := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
 N64PSP_GIT_SHA := $(shell git -C lib/n64psp rev-parse HEAD 2>/dev/null || echo unknown)
 SF64_GIT_DIRTY := $(shell test -z "$$(git status --porcelain 2>/dev/null)" && echo clean || echo dirty)
 N64PSP_GIT_DIRTY := $(shell test -z "$$(git -C lib/n64psp status --porcelain 2>/dev/null)" && echo clean || echo dirty)
-ifeq ($(PSP_GFX_BACKEND),pspgl)
+ifeq ($(PSP_GFX_HAS_PSPGL),1)
 PSPGL_GIT_SHA := $(shell git -C $(PSPGL_DIR) rev-parse HEAD 2>/dev/null || echo unknown)
 PSPGL_GIT_DIRTY := $(shell test -z "$$(git -C $(PSPGL_DIR) status --porcelain 2>/dev/null)" && echo clean || echo dirty)
 PSPGL_SOURCE_MODE := $(if $(filter 1,$(USE_LOCAL_PSPGL)),local,system)
@@ -341,7 +342,7 @@ endif
 ifeq ($(PSP_RENDERER_DIAGNOSTICS),1)
 CFLAGS += -DPSP_RENDERER_DIAGNOSTICS=1
 endif
-ifeq ($(PSP_GFX_BACKEND),pspgl)
+ifeq ($(PSP_GFX_HAS_PSPGL),1)
 ifeq ($(USE_LOCAL_PSPGL),1)
 PSPGL_HEADER := $(firstword $(wildcard $(PSPGL_DIR)/GLES/egl.h) $(wildcard $(PSPGL_DIR)/GL/gl.h))
 ifeq ($(PSPGL_HEADER),)
@@ -408,9 +409,10 @@ PSP_BASE_LINK_SCRIPT :=
 PSP_LAYOUT_CONTROL_ELF :=
 PSP_LAYOUT_CONTROL_MAP :=
 PSP_LAYOUT_DEPS :=
-ifeq ($(PSP_GFX_BACKEND)$(PSP_FULL),gu1)
+ifneq ($(filter gu unified,$(PSP_GFX_BACKEND)),)
+ifeq ($(PSP_FULL),1)
 ifeq ($(filter 1,$(PROFILE_PSP) $(PROFILE_PHASES) $(PROFILE_HW_COUNTERS) $(PROFILE_POOL_LOOKUP) $(PSP_TRACE) $(PSP_RENDERER_DIAGNOSTICS)),)
-PSP_LAYOUT_PLAN := src/psp/gfx/gfx_psp_layout.json
+PSP_LAYOUT_PLAN := $(if $(filter unified,$(PSP_GFX_BACKEND)),src/psp/gfx/gfx_psp_layout.json,src/psp/gfx/gfx_psp_layout_gu.json)
 PSP_LAYOUT_TOOL := $(N64PSP_DIR)/scripts/link_layout.py
 PSP_LAYOUT_RELOCATIONS := src/psp/gfx/gfx_psp_layout_relocations.json
 PSP_LAYOUT_RELOCATION_TOOL := src/psp/gfx/native_layout_relocation.py
@@ -420,6 +422,7 @@ PSP_LAYOUT_CONTROL_MAP := $(BUILD_DIR)/$(TARGET).layout-control.map
 PSP_LINK_SCRIPT := $(BUILD_DIR)/gfx-layout-production.prx.ld
 PSP_LAYOUT_DEPS := $(PSP_LINK_SCRIPT) $(PSP_BASE_LINK_SCRIPT) $(PSP_LAYOUT_PLAN) \
 	$(PSP_LAYOUT_RELOCATIONS) $(PSP_LAYOUT_TOOL) $(PSP_LAYOUT_RELOCATION_TOOL)
+endif
 endif
 endif
 
@@ -650,7 +653,7 @@ ifneq ($(PSP_LAYOUT_DEPS),)
 endif
 	$(PYTHON) src/psp/gfx/native_asset_compile.py $(NATIVE_COVERAGE_ARGS) --build-dir $(BUILD_DIR) --verify-elf $@
 ifeq ($(PSP_GFX_GU_SCRATCHPAD),1)
-	$(PYTHON) src/psp/gfx/scratchpad_code.py verify $(BUILD_DIR)
+	$(PYTHON) src/psp/gfx/scratchpad_code.py verify $(BUILD_DIR) --layout-plan $(PSP_LAYOUT_PLAN)
 endif
 
 $(PSP_MAP): $(PSP_ELF)
@@ -710,7 +713,7 @@ NATIVE_ASSET_HEADERS := $(addprefix include/assets/,$(notdir $(NATIVE_ASSET_SOUR
 $(BUILD_DIR)/native_assets.inc.c: $(NATIVE_ASSET_OBJECTS) $(NATIVE_ASSET_HEADERS) src/psp/gfx/native_asset_compile.py $(NATIVE_ASSET_MANIFEST) $(NATIVE_COVERAGE_POLICY) $(NATIVE_SELECTION_STAMP)
 	$(PYTHON) src/psp/gfx/native_asset_compile.py $(NATIVE_COVERAGE_ARGS) --build-dir $(BUILD_DIR) --report $(BUILD_DIR)/native_assets.json $@
 
-ifeq ($(PSP_GFX_BACKEND),gu)
+ifeq ($(PSP_GFX_HAS_GU),1)
 RETAINED_ASSET_SOURCES := $(shell $(PYTHON) src/psp/gfx/native_asset_compile.py --retained-sources)
 RETAINED_ASSET_OBJECTS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(RETAINED_ASSET_SOURCES))
 RETAINED_ASSET_HEADERS := $(addprefix include/assets/,$(notdir $(RETAINED_ASSET_SOURCES:.c=.h)))
