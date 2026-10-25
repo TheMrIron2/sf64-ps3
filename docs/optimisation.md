@@ -46,16 +46,102 @@ the first recorded task, include retired storage until freed, and do not count
 mutable refresh as a new allocation. Track simultaneous aggregate peaks rather
 than adding cohort peaks. The [six-sweep review](texture_census_hardware_review.md)
 finds only slot-pressure evictions, no RAM fallback or allocation failure, and
-IA8 decode averaging at most 4.43 microseconds per task. IA8 4444 remains a
-memory/sampling pilot, not a demonstrated CPU or eviction win. Old hardware
-upload-byte counters assume four bytes per texel; use final-upload payloads.
+IA8 decode averaging at most 4.43 microseconds per task. That motivated the
+IA8 memory/sampling trial reviewed below. Old hardware upload-byte counters
+assume four bytes per texel; use final-upload payloads.
 Retained meshes also leave source command counts incomplete; use tagged times
 with their coverage limit rather than source command fractions.
 
-The owner prioritised a [192-slot cache trial](texture_cache_192_trial.md) before
-4444 or lighting. Keep the EDRAM budget and lookup tables fixed. More slots
-can reduce capacity evictions, but lengthen existing scans; check task time,
-misses, uploads and RAM fallback before promoting the single constant change.
+The 192-slot trial is closed: fewer evictions did not establish a clean hardware
+performance benefit, so 128 remains production. The [IA8 4444 trial](codex/ia8_4444_trial.md)
+keeps that capacity and halves final IA8 storage. Quantise after SF64 transfer,
+environment blending and soft coverage; native four-bit inputs do not make those
+outputs lossless. Host errors reach 8/255 RGB and 7/255 soft alpha. Preserve GE
+flushes and distinguish the hardware texture cache from software residency.
+The 21 October screen rejects promotion: 4444 mean task time is +0.32% at
+Title, +1.61% at Aquas and +19.39% at Zoness. Bolse's −5.80% mean comes with
+worse P95/P99 and sharply varying task times within the recording. There is only one
+A/B pair per scene, so repeatability and causal format regressions remain
+unproven. Visual acceptance is also unrecorded. Close the trial and keep 8888;
+no further census or format heuristics are warranted for this trial. Smaller
+allocations alone do not justify promotion.
+
+The independent [whole-list GE probe](ge_execution_replay.md) reuses a completed
+list at its original address before the next frame can reclaim its data.
+Retained indices and inline vertices must both survive. Save initial GE state
+and colour/depth contents, validate replay output, then restore completed state
+before presentation. Texture-cache contents cannot be snapshotted; report the
+explicit flush policy. Serial enqueue/wait time has a different overlap and bus
+condition from normal DIRECT frontend/task time. Neither a short finish tail
+nor a fast serial result alone establishes a hardware-lighting speedup.
+
+The 22 October Aquas captures now pass exact colour/depth replay validation,
+including retained indexed draws. Warm serial GE medians are 1.513 and 1.768 ms,
+against preceding DIRECT frontend means of 17.630 and 21.535 ms. Empty-list
+overhead is about 16 microseconds. This strongly supports a CPU-side bottleneck
+in those views and makes a bounded retained-lighting trial reasonable; it does
+not price that trial's saving under normal bus contention. Warmed Title never
+reached replay: holding the main/render thread can prevent VI forwarding needed
+to reach the probe's required task wait. Treat this as an observation-point
+limitation, not insufficient warmup or a rendering mismatch. See the
+[hardware review](ge_execution_replay.md#hardware-results--22-october).
+
+Close GE replay with those two Aquas results and retain the isolated diagnostic.
+The next [small audit](scratchpad_code_feasibility.md) concerns executable
+scratchpad placement, independent of the failed data-cache experiment. Five
+VFPU leaves total 1,840 bytes with no object relocations, making a bounded
+correctness test plausible. Their instruction-stall cost remains unmeasured;
+aggregate misses and fast serial GE execution do not prove an I-cache bottleneck.
+Do not develop this and GE lighting simultaneously. Limit further optimisation
+to these bounded experiments before returning to PSP UI and gameplay polish.
+
+The [review and standalone code probe](scratchpad_code_feasibility.md#review-fact-check-and-standalone-experiment)
+add an aligned RAM-copy control, a RAM-only power-lock check and warm versus
+instruction-pressure workloads. Animal Forest does include state/draw code,
+but source annotations do not prove instruction-cache eviction or a saving.
+The probe builds and passes static checks. On 23 October the owner accepted
+the RAM-only power-lock check after a passing second attempt; the first attempt
+shut down and required a full boot, with cause unconfirmed. Scratchpad execution
+then passed all 432 comparisons, code guards and restoration at stable
+222/111 MHz, and ordinary suspend/resume after completion also passes.
+Warm 32-vertex timing is effectively neutral; pressure totals
+fall 0.12–0.34% against original code and include the executed pressure loop.
+One capture without miss counters or whole-task timing establishes feasibility,
+not an SF64 speedup. No VFPU cluster expansion is justified by this result alone.
+
+The bounded [draw-state trial](scratchpad_state_trial.md) redirects four calls
+after compilation while preserving all backend instruction sections and pins.
+Preserve private callee register assumptions when adding diagnostic dispatch;
+matching a C signature alone does not guarantee this. The shared 2,848-byte GU
+state helper is the only copied function. All four hardware captures pass guards
+and restoration at stable 333/166 MHz. Fixed recorded work in Aquas, Bolse and
+Macbeth yields savings of 0.213 ms (1.09%), 0.045 ms (0.20%) and 0.306 ms
+(1.62%) per device task. Scratchpad beats original code and the aligned RAM copy
+in every balanced round of those three views. The changing-work first capture's
+1.39% slower mean remains inconclusive. Loaded-vertex counts are disabled in
+this build and submitted vertices omit retained mesh draws; equal coarse counts
+do not prove identical commands or an I-cache cause. The additional scenes
+supersede the earlier closure recommendation and pass the diagnostic timing
+gate. Proceed with production integration for this helper only, resolving
+ownership and safe suspend/resume before persistent scratchpad execution.
+Validate the cleaned build before promotion. The owner subsequently authorised
+one bounded [combination screen](scratchpad_combination_trial.md): all subsets
+of state application, effective material resolution, texture preparation and
+batch flush, totalling 5,212 code bytes in 5,888 guarded bytes. Compare every
+addition against state alone; spare SRAM is not a reason to copy more code.
+Viewport selection has a compiler jump table and is excluded. No general
+relocation framework or further shortlist expansion is planned.
+The isolated Bolse/Macbeth/Aquas screens now pass with fixed recorded work in
+each. State + material + texture (4,692 bytes) saves a further 0.337/0.233/0.172 ms
+against state alone, consistently across all nine scene/round comparisons.
+The finalist confirmation also wins all nine comparisons, saving
+0.287/0.219/0.270 ms (1.51/1.19/1.50%) in its own Bolse/Macbeth/Aquas views.
+Flush helps Bolse by a further 24 microseconds but is effectively neutral in
+Macbeth and slower by 9 microseconds in Aquas. It fails the cross-scene gate.
+Select the 4,692-byte three-function set and close combination selection.
+Title's incomplete sweep is excluded; absolute times are not pooled across
+different views or binaries. Next resolve production ownership and safe resume,
+then validate the cleaned build. Spare SRAM does not justify more candidates.
 
 ## Build-time preprocessing audit
 
