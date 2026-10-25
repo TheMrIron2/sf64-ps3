@@ -1007,3 +1007,12 @@ uncached PSP VRAM blending: the owner observed a large slowdown with the CPU
 menu, so menu rectangles and antialiased text now use GPU sprites and immutable
 RAM font textures. The owner confirmed the performance fix on a physical PSP
 with the GU backend.
+
+Runtime audio starts Off and skips synthesis without restarting the sequencer or
+output thread. Existing PCM drains before silence; enabling audio resumes the
+retained audio clock rather than replaying missed ticks. Only the audio scheduler
+changes mixer ownership after ME completion. CPU-to-ME handover writes back the
+mixer and invalidates it on ME before execution; ME-to-CPU handover invalidates
+the CPU copy. PCM queues stay shared. A timed-out ME still running must block
+synthesis and buffer reuse even if its pending-job flag has already cleared.
+Off and blocked handovers wait on VI because no PCM backpressure can pace them.

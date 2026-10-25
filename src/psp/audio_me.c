@@ -111,6 +111,7 @@ enum {
     PSP_AUDIO_ME_SHARED_RESULT,
     PSP_AUDIO_ME_SHARED_PROGRESS,
     PSP_AUDIO_ME_SHARED_COMPLETION_ENABLED,
+    PSP_AUDIO_ME_SHARED_INVALIDATE_MIXER,
 #if PSP_AUDIO_VME
     PSP_AUDIO_ME_SHARED_VME_STATE,
     PSP_AUDIO_ME_SHARED_VME_CHECKPOINT,
@@ -175,6 +176,8 @@ static volatile u32 sSharedStorage[PSP_AUDIO_ME_SHARED_COUNT]
 
 #define PSP_AUDIO_ME_SHARED \
     ((volatile u32*) (PSP_AUDIO_ME_UNCACHED | (u32) (uintptr_t) sSharedStorage))
+static int sMixerOnMe;
+#define sMeInvalidateMixer PSP_AUDIO_ME_SHARED[PSP_AUDIO_ME_SHARED_INVALIDATE_MIXER]
 #define sMeState PSP_AUDIO_ME_SHARED[PSP_AUDIO_ME_SHARED_STATE]
 #define sMeCommands PSP_AUDIO_ME_SHARED[PSP_AUDIO_ME_SHARED_COMMANDS]
 #define sMeCommandCount PSP_AUDIO_ME_SHARED[PSP_AUDIO_ME_SHARED_COMMAND_COUNT]
@@ -5929,6 +5932,10 @@ __attribute__((noinline, aligned(4))) void meLibOnProcess(void) {
             const Acmd* commands = (const Acmd*) (uintptr_t) sMeCommands;
             s32 commandCount = (s32) sMeCommandCount;
 
+            if (sMeInvalidateMixer) {
+                psp_audio_me_invalidate_range_me(PspAudioMixer_GetStateAddress(), PspAudioMixer_GetStateSize());
+                sMeInvalidateMixer = 0;
+            }
 #if defined(PSP_LOG_ENABLED) && PSP_LOG_ENABLED
             meLibDcacheWritebackInvalidateAll();
 #else
@@ -5981,6 +5988,8 @@ int PspAudioMe_Boot(void) {
     sMeResult = 0;
     sMeProgress = 0;
     sMeCompletionEnabled = 0;
+    sMeInvalidateMixer = 0;
+    sMixerOnMe = 0;
 #if PSP_AUDIO_VME
     sVmeState = PSP_AUDIO_VME_UNINITIALIZED;
     sVmeCheckpoint = 0;
@@ -6172,6 +6181,8 @@ static void psp_audio_me_wait(PspAudioProfileWaitReason reason) {
     } else if (sMeState == PSP_AUDIO_ME_FAULT) {
         sceKernelDcacheWritebackInvalidateAll();
         PspAudioProfile_RecordFallback();
+        psp_audio_me_invalidate_range_cpu(PspAudioMixer_GetStateAddress(), PspAudioMixer_GetStateSize());
+        sMixerOnMe = 0;
         sLastError = PspAudioMixer_ExecuteCommandList(sPendingCommands, sPendingCommandCount);
         if ((sLastError == 0) && !PspAudioMixer_ValidateState()) {
             sLastError = -3;
@@ -6199,6 +6210,22 @@ void PspAudioMe_Wait(void) {
     psp_audio_me_wait(PSP_AUDIO_PROFILE_WAIT_PUBLIC);
 }
 
+// The audio scheduler transfers mixer ownership after pending ME work completes
+int PspAudioMe_SetAsync(int enabled) {
+    PspAudioMe_Wait();
+    if (!psp_audio_me_fallback_safe()) return 0;
+    if (enabled && sInitialized && !sMixerOnMe) {
+        psp_audio_me_writeback_range_cpu(PspAudioMixer_GetStateAddress(), PspAudioMixer_GetStateSize());
+        sMeInvalidateMixer = 1;
+        meLibSync();
+        sMixerOnMe = 1;
+    } else if (!enabled && sMixerOnMe) {
+        psp_audio_me_invalidate_range_cpu(PspAudioMixer_GetStateAddress(), PspAudioMixer_GetStateSize());
+        sMixerOnMe = 0;
+    }
+    return 1;
+}
+
 void PspAudioMe_Submit(const Acmd* commands, s32 commandCount) {
     if ((commands == NULL) || (commandCount <= 0)) {
         return;
@@ -6210,6 +6237,7 @@ void PspAudioMe_Submit(const Acmd* commands, s32 commandCount) {
             sLastError = -2;
             return;
         }
+        if (!PspAudioMe_SetAsync(0)) return;
         PspAudioProfile_RecordFallback();
         sLastError = PspAudioMixer_ExecuteCommandList(commands, commandCount);
         if ((sLastError == 0) && !PspAudioMixer_ValidateState()) {
@@ -6768,6 +6796,11 @@ int PspAudioMe_Boot(void) {
 
 int PspAudioMe_Init(void) {
     return 0;
+}
+
+int PspAudioMe_SetAsync(int enabled) {
+    (void) enabled;
+    return 1;
 }
 
 void PspAudioMe_Wait(void) {

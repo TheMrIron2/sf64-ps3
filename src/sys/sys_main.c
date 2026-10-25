@@ -6,6 +6,7 @@
 #include "src/psp/frame_interpolation.h"
 #include "src/psp/frame_scheduler.h"
 #include "src/psp/input.h"
+#include "src/psp/audio_mode.h"
 #include "src/psp/menu.h"
 #include "src/psp/platform.h"
 #include "src/psp/profiler.h"
@@ -190,6 +191,9 @@ void Audio_ThreadEntry(void* arg0) {
 #endif
         }
 #if defined(TARGET_PSP) && PSP_AUDIO
+        if (PspAudioMode_GetActive() == PSP_AUDIO_OFF || task == NULL) {
+            MQ_WAIT_FOR_MESG(&gAudioVImesgQueue, NULL);
+        }
         continue;
 #else
         MQ_GET_MESG(&gAudioTaskMesgQueue, NULL);

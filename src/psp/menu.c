@@ -5,6 +5,7 @@
 #include "src/psp/menu.h"
 #include "src/psp/overlay.h"
 #include "src/psp/settings.h"
+#include "src/psp/audio_mode.h"
 #include "src/psp/display.h"
 #include "src/psp/frame_scheduler.h"
 #include "src/psp/profiler.h"
@@ -34,7 +35,6 @@ typedef struct {
 static int sOpen;
 static int sScreen;
 static int sSelected;
-static int sAudio;
 static int sColour;
 static const u32 sAccents[] = { 0xCD4E5C26, 0xCD3838A0, 0xCDA06030 };
 #if PSP_MENU_DIAGNOSTICS
@@ -97,7 +97,7 @@ void PspMenu_Update(u32 pressed) {
             sSelected = 0;
         }
     } else if (sScreen == MENU_SETTINGS) {
-        if (sSelected == 0) sAudio = (sAudio + direction + 3) % 3;
+        if (sSelected == 0) PspAudioMode_Request((PspAudioMode_GetRequested() + direction + PSP_AUDIO_MODE_COUNT) % PSP_AUDIO_MODE_COUNT);
         else sColour = (sColour + direction + 3) % 3;
     } else if (sScreen == MENU_GRAPHICS) {
         if (sSelected == 0) {
@@ -227,9 +227,10 @@ void PspMenu_Publish(void) {
         static const char* const audio[] = { "Off", "Sync", "Async" };
         static const char* const colours[] = { "Green", "Red", "Blue" };
         snprintf(view.title, MENU_TEXT, "%s", "Settings");
-        ROW("Audio: <%s>", audio[sAudio]);
+        ROW("Audio: <%s>", audio[PspAudioMode_GetRequested()]);
         ROW("Colour: <%s>", colours[sColour]);
-        snprintf(view.status, MENU_TEXT, "%s", "Audio selection is a placeholder");
+        if (PspAudioMode_GetRequested() != PspAudioMode_GetActive())
+            snprintf(view.status, MENU_TEXT, "%s", "Switching audio...");
     } else if (sScreen == MENU_GRAPHICS) {
         int mode = PspDisplay_GetConfig()->mode;
         int vis = PspFrameScheduler_GetPresentationVIs();

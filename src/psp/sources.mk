@@ -62,6 +62,7 @@ PSP_AUDIO_C_FILES := \
     src/audio/audio_thread.c \
     src/audio/note_data.c \
     src/audio/wave_samples.c \
+    src/psp/audio_mode.c \
     src/psp/audio_mixer.c \
     src/psp/audio_output.c
 
@@ -77,10 +78,8 @@ PSP_RENDERER_C_FILES += src/psp/gfx/gfx_psp_scratchpad.c
 PSP_GAME_S_FILES += src/psp/gfx/gfx_psp_scratchpad_dispatch.S
 endif
 
-ifeq ($(PSP_AUDIO),1)
 PSP_AUDIO_C_FILES += src/psp/audio_me.c
 PSP_GAME_S_FILES += src/psp/audio_me_kcall.S
-endif
 
 PSP_GAME_C_FILES := \
     src/buffers.c \

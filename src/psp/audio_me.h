@@ -428,6 +428,7 @@ int PspAudioMe_Boot(void);
 int PspAudioMe_Init(void);
 void PspAudioMe_Submit(const Acmd* commands, s32 commandCount);
 void PspAudioMe_Wait(void);
+int PspAudioMe_SetAsync(int enabled);
 int PspAudioMe_IsActive(void);
 int PspAudioMe_GetLastError(void);
 void PspAudioMe_GetVmeSmokeResult(PspAudioVmeSmokeResult* result);

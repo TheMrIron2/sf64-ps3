@@ -8,7 +8,7 @@
 #   make PSP_FULL=0 psp    # debug/bootstrap EBOOT only
 #   make bootstrap         # same, isolated under build/psp-bootstrap
 #   make PROFILE_PSP=1 psp # profiling-friendly ELF packaging
-#   make PSP_AUDIO=1 PSP_VME=1 psp # VME validation build
+#   make PSP_VME=1 psp # VME validation build
 
 -include .make_options
 
@@ -50,7 +50,6 @@ PSP_ORIGINAL_FOG ?= 0
 ifeq ($(PSP_RENDERER_DIAGNOSTICS),1)
 PSP_LOG := 1
 endif
-PSP_AUDIO ?= 0
 PSP_AUDIO_PROFILE ?= 0
 PSP_VME ?= 0
 PSP_FPS_OVERLAY ?= 1
@@ -110,19 +109,9 @@ DATE ?= date
 PSPSDK ?= $(shell $(PSP_CONFIG) --pspsdk-path 2>/dev/null)
 PSPDEV ?= $(shell $(PSP_CONFIG) --psp-prefix 2>/dev/null | sed 's,/psp$$,,')
 
-ifneq ($(PSP_AUDIO),0)
-ifneq ($(PSP_AUDIO),1)
-$(error PSP_AUDIO must be 0 or 1)
-endif
-endif
 ifneq ($(PSP_AUDIO_PROFILE),0)
 ifneq ($(PSP_AUDIO_PROFILE),1)
 $(error PSP_AUDIO_PROFILE must be 0 or 1)
-endif
-endif
-ifeq ($(PSP_AUDIO_PROFILE),1)
-ifneq ($(PSP_AUDIO),1)
-$(error PSP_AUDIO_PROFILE=1 requires PSP_AUDIO=1)
 endif
 endif
 ifneq ($(PSP_VME),0)
@@ -131,9 +120,6 @@ $(error PSP_VME must be 0 or 1)
 endif
 endif
 ifeq ($(PSP_VME),1)
-ifneq ($(PSP_AUDIO),1)
-$(error PSP_VME=1 requires PSP_AUDIO=1)
-endif
 override PSP_AUDIO_PROFILE := 1
 endif
 override PSP_AUDIO_VME := $(PSP_VME)
@@ -174,14 +160,14 @@ PSPGL_DIR ?= lib/pspgl
 LOCAL_PSPGL_LIB := $(PSPGL_DIR)/libGL.a
 
 PSP_LIBS ?= -lm -lpspdebug -lpspdisplay -lpspgu -lpspge -lpspctrl -lpspaudio -lpsppower
-ifeq ($(PSP_AUDIO),1)
+ifeq ($(PSP_FULL),1)
 ifeq ($(wildcard $(PSPDEV)/psp/include/me-core-mapper/me-core.h),)
 $(error PSP Media Engine headers not found. Install psp-media-engine-custom-core)
 endif
 ifeq ($(wildcard $(PSPDEV)/psp/lib/libme-core.a),)
 $(error PSP Media Engine library not found. Install psp-media-engine-custom-core)
 endif
-PSP_LIBS := -lme-core $(PSP_LIBS)
+PSP_LIBS := -lme-core -lpspsdk $(PSP_LIBS)
 endif
 
 ifeq ($(COLOR),1)
@@ -308,7 +294,7 @@ CFLAGS += -fno-exceptions -fno-unwind-tables
 CFLAGS += -fno-asynchronous-unwind-tables -fno-ident
 CFLAGS += -DPSP_FPS_OVERLAY=$(PSP_FPS_OVERLAY)
 CFLAGS += -DPSP_NATIVE_COVERAGE_AB=$(PSP_NATIVE_COVERAGE_AB)
-CFLAGS += -DPSP_AUDIO=$(PSP_AUDIO)
+CFLAGS += -DPSP_AUDIO=1
 CFLAGS += -DPSP_AUDIO_PROFILE=$(PSP_AUDIO_PROFILE)
 CFLAGS += -DPSP_AUDIO_VME=$(PSP_AUDIO_VME)
 CFLAGS += -DPSP_VME=$(PSP_VME)
@@ -443,7 +429,7 @@ CFLAGS += -DPSP_GFX_GU_SCRATCHPAD=$(PSP_GFX_GU_SCRATCHPAD)
 LDFLAGS += -specs=$(PSPSDK)/lib/prxspecs \
            $(PSP_LINK_FLAG) \
            $(PSPSDK)/lib/prxexports.o
-ifeq ($(PSP_AUDIO),1)
+ifeq ($(PSP_FULL),1)
 LDFLAGS += -Wl,-u,sf64PspMeKcallImport
 endif
 
@@ -537,7 +523,7 @@ psp-profile-hw-counters: PSP_LOG=0
 psp-profile-hw-counters: PSP_TRACE=0
 psp-profile-hw-counters: PSP_RENDERER_DIAGNOSTICS=0
 psp-profile-hw-counters:
-	$(MAKE) PROFILE_PSP=0 PROFILE_PHASES=0 PROFILE_COMPONENTS=0 PROFILE_HW_COUNTERS=1 PROFILE_HW_COUNTER_SCOPES=$(PROFILE_HW_COUNTER_SCOPES) PSP_GFX_BACKEND=$(PSP_GFX_BACKEND) BUILD_DIR=$(PSP_PROFILE_BUILD_ROOT)/hw-counters PSP_FPS_OVERLAY=$(PSP_FPS_OVERLAY) PSP_LOG=$(PSP_LOG) PSP_TRACE=$(PSP_TRACE) PSP_RENDERER_DIAGNOSTICS=$(PSP_RENDERER_DIAGNOSTICS) PSP_AUDIO=$(PSP_AUDIO) PSP_VME=$(PSP_VME) PSPGL_SWAP_INTERVAL=$(PSPGL_SWAP_INTERVAL) USE_LOCAL_PSPGL=$(USE_LOCAL_PSPGL) psp
+	$(MAKE) PROFILE_PSP=0 PROFILE_PHASES=0 PROFILE_COMPONENTS=0 PROFILE_HW_COUNTERS=1 PROFILE_HW_COUNTER_SCOPES=$(PROFILE_HW_COUNTER_SCOPES) PSP_GFX_BACKEND=$(PSP_GFX_BACKEND) BUILD_DIR=$(PSP_PROFILE_BUILD_ROOT)/hw-counters PSP_FPS_OVERLAY=$(PSP_FPS_OVERLAY) PSP_LOG=$(PSP_LOG) PSP_TRACE=$(PSP_TRACE) PSP_RENDERER_DIAGNOSTICS=$(PSP_RENDERER_DIAGNOSTICS) PSP_VME=$(PSP_VME) PSPGL_SWAP_INTERVAL=$(PSPGL_SWAP_INTERVAL) USE_LOCAL_PSPGL=$(USE_LOCAL_PSPGL) psp
 
 psp-profile-builds: psp-profile-gprof psp-profile-phases
 
@@ -607,7 +593,7 @@ $(PROFILE_METADATA): $(PSP_EBOOT) $(PSP_ELF) $(PSP_MAP) Makefile
 		printf 'PROFILE_POOL_LOOKUP=%s\n' '$(PROFILE_POOL_LOOKUP)'; \
 		printf 'USE_LOCAL_PSPGL=%s\n' '$(USE_LOCAL_PSPGL)'; \
 		printf 'PSPGL_SWAP_INTERVAL=%s\n' '$(PSPGL_SWAP_INTERVAL)'; \
-		printf 'PSP_AUDIO=%s\n' '$(PSP_AUDIO)'; \
+		printf 'audio_runtime_default=off\n'; \
 		printf 'PSP_VME=%s\n' '$(PSP_VME)'; \
 		printf 'PSP_FPS_OVERLAY=%s\n' '$(PSP_FPS_OVERLAY)'; \
 		printf 'PSP_LOG=%s\n' '$(PSP_LOG)'; \
@@ -615,7 +601,7 @@ $(PROFILE_METADATA): $(PSP_EBOOT) $(PSP_ELF) $(PSP_MAP) Makefile
 		printf 'PSP_RENDERER_DIAGNOSTICS=%s\n' '$(PSP_RENDERER_DIAGNOSTICS)'; \
 		printf 'cpu_clock_runtime=recorded in profile-NNN.txt on PSP\n'; \
 		printf 'bus_clock_runtime=recorded in profile-NNN.txt on PSP\n'; \
-		printf 'build_command=make %s PSP_GFX_BACKEND=%s BUILD_DIR=%s PROFILE_PSP=%s PROFILE_PHASES=%s PROFILE_CAPTURE_FRAMES=%s PROFILE_FRAME_TRACE=%s PROFILE_FRAME_TRACE_FRAMES=%s PROFILE_COMPONENTS=%s PROFILE_TRIVIAL_REJECTS=%s PROFILE_HW_COUNTERS=$(PROFILE_HW_COUNTERS) PROFILE_HW_COUNTER_SCOPES=$(PROFILE_HW_COUNTER_SCOPES) PROFILE_POOL_LOOKUP=$(PROFILE_POOL_LOOKUP) USE_LOCAL_PSPGL=%s PSPGL_SWAP_INTERVAL=%s PSP_AUDIO=%s PSP_VME=%s PSP_FPS_OVERLAY=%s PSP_LOG=%s PSP_TRACE=%s PSP_RENDERER_DIAGNOSTICS=%s psp\n' '$(MAKECMDGOALS)' '$(PSP_GFX_BACKEND)' '$(BUILD_DIR)' '$(PROFILE_PSP)' '$(PROFILE_PHASES)' '$(PROFILE_CAPTURE_FRAMES)' '$(PROFILE_FRAME_TRACE)' '$(PROFILE_FRAME_TRACE_FRAMES)' '$(PROFILE_COMPONENTS)' '$(PROFILE_TRIVIAL_REJECTS)' '$(PROFILE_HW_COUNTERS)' '$(PROFILE_HW_COUNTER_SCOPES)' '$(PROFILE_POOL_LOOKUP)' '$(USE_LOCAL_PSPGL)' '$(PSPGL_SWAP_INTERVAL)' '$(PSP_AUDIO)' '$(PSP_VME)' '$(PSP_FPS_OVERLAY)' '$(PSP_LOG)' '$(PSP_TRACE)' '$(PSP_RENDERER_DIAGNOSTICS)'; \
+		printf 'build_command=make %s PSP_GFX_BACKEND=%s BUILD_DIR=%s PROFILE_PSP=%s PROFILE_PHASES=%s PROFILE_CAPTURE_FRAMES=%s PROFILE_FRAME_TRACE=%s PROFILE_FRAME_TRACE_FRAMES=%s PROFILE_COMPONENTS=%s PROFILE_TRIVIAL_REJECTS=%s PROFILE_HW_COUNTERS=$(PROFILE_HW_COUNTERS) PROFILE_HW_COUNTER_SCOPES=$(PROFILE_HW_COUNTER_SCOPES) PROFILE_POOL_LOOKUP=$(PROFILE_POOL_LOOKUP) USE_LOCAL_PSPGL=%s PSPGL_SWAP_INTERVAL=%s PSP_VME=%s PSP_FPS_OVERLAY=%s PSP_LOG=%s PSP_TRACE=%s PSP_RENDERER_DIAGNOSTICS=%s psp\n' '$(MAKECMDGOALS)' '$(PSP_GFX_BACKEND)' '$(BUILD_DIR)' '$(PROFILE_PSP)' '$(PROFILE_PHASES)' '$(PROFILE_CAPTURE_FRAMES)' '$(PROFILE_FRAME_TRACE)' '$(PROFILE_FRAME_TRACE_FRAMES)' '$(PROFILE_COMPONENTS)' '$(PROFILE_TRIVIAL_REJECTS)' '$(PROFILE_HW_COUNTERS)' '$(PROFILE_HW_COUNTER_SCOPES)' '$(PROFILE_POOL_LOOKUP)' '$(USE_LOCAL_PSPGL)' '$(PSPGL_SWAP_INTERVAL)' '$(PSP_VME)' '$(PSP_FPS_OVERLAY)' '$(PSP_LOG)' '$(PSP_TRACE)' '$(PSP_RENDERER_DIAGNOSTICS)'; \
 	} > $@
 
 $(PROFILE_BUILD_COMMANDS): $(PROFILE_METADATA)

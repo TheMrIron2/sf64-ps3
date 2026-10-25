@@ -4,6 +4,8 @@
 #ifdef TARGET_PSP
 #if PSP_AUDIO
 #include "src/psp/audio_me.h"
+#include "src/psp/audio_mode.h"
+s32 PspAudioMixer_ExecuteCommandList(const Acmd* commands, s32 commandCount);
 #endif
 #include "src/psp/audio_output.h"
 #include "src/psp/platform.h"
@@ -72,6 +74,7 @@ SPTask* AudioThread_CreateTask(void) {
     static void* sPendingOutput;
     static unsigned int sPendingOutputSize;
     static s32 sPendingOutputReserved;
+    PspAudioMode audioMode;
 #endif
     u32 aiSamplesLeft;
     s32 abiCmdCount;
@@ -99,7 +102,9 @@ SPTask* AudioThread_CreateTask(void) {
     }
 
 #if defined(TARGET_PSP) && PSP_AUDIO
+    audioMode = PspAudioMode_GetRequested();
     PspAudioMe_Wait();
+    if (!PspAudioMe_SetAsync(audioMode == PSP_AUDIO_ASYNC)) return NULL;
 #if PSP_VME
     PspPlatform_ReportAudioVmeMix();
     PspPlatform_ReportAudioVmeResample();
@@ -130,6 +135,7 @@ SPTask* AudioThread_CreateTask(void) {
         sPendingOutputSize = 0;
         sPendingOutputReserved = false;
     }
+    PspAudioMode_Applied(audioMode);
 #endif
 
     osSendMesg(gAudioTaskStartQueue, (OSMesg) gAudioTaskCountQ, OS_MESG_NOBLOCK);
@@ -189,7 +195,7 @@ SPTask* AudioThread_CreateTask(void) {
         gAiBuffLengths[aiBuffIndex] = gAudioBufferParams.maxAiBufferLength;
     }
 #if defined(TARGET_PSP) && PSP_AUDIO
-    aiBuffer = PspAudioOutput_Reserve(gAiBuffLengths[aiBuffIndex] * 4);
+    aiBuffer = audioMode == PSP_AUDIO_OFF ? NULL : PspAudioOutput_Reserve(gAiBuffLengths[aiBuffIndex] * 4);
     if (aiBuffer != NULL) {
         sPendingOutputReserved = true;
     } else {
@@ -202,12 +208,13 @@ SPTask* AudioThread_CreateTask(void) {
     while (MQ_GET_MESG(gThreadCmdProcQueue, &msg)) {
         AudioThread_ProcessCmds(msg);
     }
-    #if defined(TARGET_PSP) && defined(PSP_AUDIO) && (PSP_AUDIO == 0)
-        
-        // preserve audio behaviour, but skip software synthesis
+#if defined(TARGET_PSP) && PSP_AUDIO
+    if (audioMode == PSP_AUDIO_OFF) {
         memset(aiBuffer, 0, gAiBuffLengths[aiBuffIndex] * 4);
         abiCmdCount = 0;
-    #else
+    } else
+#endif
+    {
 #if defined(TARGET_PSP) && PSP_LOG_ENABLED
         synthStartUs = sceKernelGetSystemTimeWide();
 #endif
@@ -234,8 +241,8 @@ SPTask* AudioThread_CreateTask(void) {
             sSynthPeriodOverBudget = 0;
         }
 #endif
-    #endif
-    
+    }
+
     gAudioRandom = osGetCount() * (gAudioRandom + gAudioTaskCountQ);
 #if defined(TARGET_PSP) && PSP_AUDIO
     gAudioRandom = aiBuffer[gAudioTaskCountQ & 0xFF] + gAudioRandom;
@@ -244,18 +251,24 @@ SPTask* AudioThread_CreateTask(void) {
 #endif
 
 #if defined(TARGET_PSP) && PSP_AUDIO
-    if (abiCmdCount > 0) {
-        PspAudioMe_Submit(gAbiCmdBuffs[gAudioTaskIndexQ], abiCmdCount);
-        sPendingOutput = aiBuffer;
-        sPendingOutputSize = gAiBuffLengths[aiBuffIndex] * 4;
-    } else {
-        memset(aiBuffer, 0, gAiBuffLengths[aiBuffIndex] * 4);
-        if (sPendingOutputReserved) {
-            PspAudioOutput_Commit(aiBuffer, gAiBuffLengths[aiBuffIndex] * 4);
+    if (audioMode != PSP_AUDIO_OFF) {
+        s32 result = 0;
+        if (abiCmdCount > 0 && audioMode == PSP_AUDIO_ASYNC) {
+            PspAudioMe_Submit(gAbiCmdBuffs[gAudioTaskIndexQ], abiCmdCount);
+            sPendingOutput = aiBuffer;
+            sPendingOutputSize = gAiBuffLengths[aiBuffIndex] * 4;
         } else {
-            PspAudioOutput_Submit(aiBuffer, gAiBuffLengths[aiBuffIndex] * 4);
+            if (abiCmdCount > 0) {
+                result = PspAudioMixer_ExecuteCommandList(gAbiCmdBuffs[gAudioTaskIndexQ], abiCmdCount);
+            }
+            if (abiCmdCount == 0 || result < 0) memset(aiBuffer, 0, gAiBuffLengths[aiBuffIndex] * 4);
+            if (sPendingOutputReserved) {
+                PspAudioOutput_Commit(aiBuffer, gAiBuffLengths[aiBuffIndex] * 4);
+            } else {
+                PspAudioOutput_Submit(aiBuffer, gAiBuffLengths[aiBuffIndex] * 4);
+            }
+            sPendingOutputReserved = false;
         }
-        sPendingOutputReserved = false;
     }
 #endif
 
