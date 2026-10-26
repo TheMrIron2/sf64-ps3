@@ -1,4 +1,5 @@
 #include "src/psp/eeprom_store.h"
+#include "src/psp/settings_path.h"
 
 static unsigned eeprom_crc32(const unsigned char* data, unsigned size) {
     unsigned crc = 0xFFFFFFFFU;
@@ -11,11 +12,8 @@ static unsigned eeprom_crc32(const unsigned char* data, unsigned size) {
     return ~crc;
 }
 
-static void eeprom_suffix(const PspEepromStore* store, char* output, const char* suffix) {
-    unsigned i = 0;
-    while (store->path[i] && i < sizeof(store->path) - 8) { output[i] = store->path[i]; i++; }
-    while (*suffix && i < sizeof(store->path) - 1) output[i++] = *suffix++;
-    output[i] = 0;
+static int eeprom_suffix(const PspEepromStore* store, char* output, const char* suffix) {
+    return PspSettingsPath_AppendSuffix(output, sizeof(store->path), store->path, suffix);
 }
 
 static int eeprom_read_file(PspEepromStore* store, const char* path, unsigned char* image) {
@@ -59,8 +57,7 @@ static int eeprom_commit(PspEepromStore* store) {
     char temp[256], backup[256];
     unsigned char prior[PSP_EEPROM_BYTES];
     int hadPrimary;
-    eeprom_suffix(store, temp, ".tmp");
-    eeprom_suffix(store, backup, ".bak");
+    if (!eeprom_suffix(store, temp, ".tmp") || !eeprom_suffix(store, backup, ".bak")) return 0;
     if (!eeprom_write_file(store, temp)) return 0;
     hadPrimary = eeprom_read_file(store, store->path, prior);
     if (hadPrimary) {
@@ -80,29 +77,35 @@ static int eeprom_commit(PspEepromStore* store) {
 int PspEepromStore_Init(PspEepromStore* store, const PspEepromFileOps* ops, const char* path) {
     char backup[256], temp[256];
     unsigned i;
-    if (!store || !ops || !path || !ops->open || !ops->read || !ops->write || !ops->close ||
+    if (!store) return 0;
+    store->initialized = 0;
+    store->transaction = store->dirty = 0;
+    if (!ops || !path || !ops->open || !ops->read || !ops->write || !ops->close ||
         !ops->rename || !ops->remove || !ops->exists) return 0;
     for (i = 0; path[i] && i < sizeof(store->path) - 1; i++) store->path[i] = path[i];
     if (path[i]) return 0;
     store->path[i] = 0;
     store->ops = ops;
-    store->initialized = 1;
-    store->transaction = store->dirty = 0;
-    if (eeprom_read_file(store, store->path, store->image)) return 1;
-    eeprom_suffix(store, backup, ".bak");
+    if (!eeprom_suffix(store, backup, ".bak") || !eeprom_suffix(store, temp, ".tmp")) return 0;
+    if (eeprom_read_file(store, store->path, store->image)) {
+        store->initialized = 1;
+        return 1;
+    }
     if (eeprom_read_file(store, backup, store->image)) {
         store->ops->remove(store->path);
         store->ops->rename(backup, store->path);
+        store->initialized = 1;
         return 1;
     }
-    eeprom_suffix(store, temp, ".tmp");
     if (eeprom_read_file(store, temp, store->image)) {
         store->ops->remove(store->path);
-        if (store->ops->rename(temp, store->path) == 0) return 1;
+        store->ops->rename(temp, store->path);
+        store->initialized = 1;
         return 1;
     }
     if (store->ops->exists(store->path) || store->ops->exists(backup) || store->ops->exists(temp)) return 0;
     for (i = 0; i < PSP_EEPROM_BYTES; i++) store->image[i] = 0;
+    store->initialized = 1;
     return 1;
 }
 
