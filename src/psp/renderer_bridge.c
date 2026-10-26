@@ -10,6 +10,7 @@
 #include "src/psp/platform.h"
 #include "src/psp/profiler.h"
 #include "src/psp/renderer.h"
+#include "src/psp/gu_census.h"
 #include "src/psp/menu.h"
 #include "src/psp/settings.h"
 #include "src/psp/overlay.h"
@@ -215,11 +216,14 @@ int PspRenderer_RenderGfxTask(SPTask* task, u32 taskIndex) {
             return 0;
         }
 
+        PspCensus_Begin();
         if (!PspFrameInterpolation_ShouldPresent(task)) {
 #if PSP_FPS_OVERLAY
             sPerfWindowSkipped++;
 #endif
+            PspCensus_Interpolation(task);
             PspFrameInterpolation_FinishPresentation(task);
+            PspCensus_End(0);
             return 0;
         }
 
@@ -241,6 +245,7 @@ int PspRenderer_RenderGfxTask(SPTask* task, u32 taskIndex) {
             PspGfxDl_GetLastWork(&hwCommands, &hwLoadedVertices, &hwSubmittedVertices);
     #endif
         }
+        PspCensus_Interpolation(task);
         PspFrameInterpolation_FinishPresentation(task);
 #if PSP_GFX_BACKEND_GU
         if (PspGfxBackend_IsGu() && PspMenu_Visible()) menuDrawn = psp_renderer_draw_overlays(1);
@@ -248,7 +253,9 @@ int PspRenderer_RenderGfxTask(SPTask* task, u32 taskIndex) {
 
         PspHwCounterProfile_ScopeEnd(PSP_HW_SCOPE_FRONTEND);
         PspHwCounterProfile_ScopeBegin(PSP_HW_SCOPE_FLUSH);
+        PspCensus_Mark(0);
         PspGfxDevice_Submit();
+        PspCensus_Mark(1);
         PspHwCounterProfile_ScopeEnd(PSP_HW_SCOPE_FLUSH);
         PspHwCounterProfile_ScopeEnd(PSP_HW_SCOPE_TASK);
 
@@ -266,6 +273,7 @@ int PspRenderer_RenderGfxTask(SPTask* task, u32 taskIndex) {
         presented = PspGfxDevice_Present();
         PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PRESENT_SWAP);
         PspHwCounterProfile_ScopeEnd(PSP_HW_SCOPE_PRESENT);
+        PspCensus_End(presented);
         PspProfiler_ComponentTaskEnd();
 
     #if PROFILE_HW_COUNTERS

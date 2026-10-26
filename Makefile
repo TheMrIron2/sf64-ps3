@@ -29,6 +29,13 @@ ifneq ($(PSP_GFX_BACKEND),unified)
 PSP_GFX_BACKEND_CFLAGS += -DPSP_GFX_BACKEND_DIRECT_CALLS=1
 endif
 PSP_FULL ?= 1
+PROFILE_CENSUS ?= 0
+PROFILE_CENSUS_DISPATCH ?= 0
+ifeq ($(PROFILE_CENSUS_DISPATCH),1)
+ifneq ($(PROFILE_CENSUS),1)
+$(error PROFILE_CENSUS_DISPATCH requires PROFILE_CENSUS=1)
+endif
+endif
 PROFILE_PSP ?= 0
 PROFILE_PHASES ?= 0
 PROFILE_CAPTURE_FRAMES ?= 300
@@ -54,6 +61,7 @@ endif
 PSP_AUDIO_PROFILE ?= 0
 PSP_VME ?= 0
 PSP_FPS_OVERLAY ?= 1
+PSP_FAST_AQUAS ?= 1
 PSP_NATIVE_COVERAGE_AB ?= 0
 NATIVE_COVERAGE_POLICY ?=
 NATIVE_CANDIDATES ?=
@@ -293,7 +301,9 @@ CFLAGS += -fwrapv -funsigned-char
 CFLAGS += -ffunction-sections -fdata-sections
 CFLAGS += -fno-exceptions -fno-unwind-tables
 CFLAGS += -fno-asynchronous-unwind-tables -fno-ident
+CFLAGS += -DPROFILE_CENSUS=$(PROFILE_CENSUS) -DPROFILE_CENSUS_DISPATCH=$(PROFILE_CENSUS_DISPATCH)
 CFLAGS += -DPSP_FPS_OVERLAY=$(PSP_FPS_OVERLAY)
+CFLAGS += -DPSP_FAST_AQUAS=$(PSP_FAST_AQUAS)
 CFLAGS += -DPSP_NATIVE_COVERAGE_AB=$(PSP_NATIVE_COVERAGE_AB)
 CFLAGS += -DPSP_AUDIO=1
 CFLAGS += -DPSP_AUDIO_PROFILE=$(PSP_AUDIO_PROFILE)
@@ -411,8 +421,12 @@ PSP_LAYOUT_CONTROL_MAP :=
 PSP_LAYOUT_DEPS :=
 ifneq ($(filter gu unified,$(PSP_GFX_BACKEND)),)
 ifeq ($(PSP_FULL),1)
-ifeq ($(filter 1,$(PROFILE_PSP) $(PROFILE_PHASES) $(PROFILE_HW_COUNTERS) $(PROFILE_POOL_LOOKUP) $(PSP_TRACE) $(PSP_RENDERER_DIAGNOSTICS)),)
+ifeq ($(filter 1,$(PROFILE_PSP) $(PROFILE_PHASES) $(PROFILE_HW_COUNTERS) $(PROFILE_POOL_LOOKUP) $(PSP_TRACE) $(PSP_RENDERER_DIAGNOSTICS) $(PROFILE_CENSUS_DISPATCH)),)
 PSP_LAYOUT_PLAN := $(if $(filter unified,$(PSP_GFX_BACKEND)),src/psp/gfx/gfx_psp_layout.json,src/psp/gfx/gfx_psp_layout_gu.json)
+PSP_LAYOUT_BASE_PLAN := $(PSP_LAYOUT_PLAN)
+ifeq ($(PSP_FAST_AQUAS),1)
+PSP_LAYOUT_PLAN := $(BUILD_DIR)/gfx-layout-fast-aquas.json
+endif
 PSP_LAYOUT_TOOL := $(N64PSP_DIR)/scripts/link_layout.py
 PSP_LAYOUT_RELOCATIONS := src/psp/gfx/gfx_psp_layout_relocations.json
 PSP_LAYOUT_RELOCATION_TOOL := src/psp/gfx/native_layout_relocation.py
@@ -631,6 +645,10 @@ $(PSP_SFO):
 
 .DELETE_ON_ERROR:
 ifneq ($(PSP_LAYOUT_DEPS),)
+ifeq ($(PSP_FAST_AQUAS),1)
+$(PSP_LAYOUT_PLAN): $(PSP_LAYOUT_BASE_PLAN) src/psp/gfx/aquas_layout.py $(BUILD_DIR)/src/psp/gfx/gfx_psp_dl.o
+	$(PYTHON) src/psp/gfx/aquas_layout.py --base $(PSP_LAYOUT_BASE_PLAN) --object $(BUILD_DIR)/src/psp/gfx/gfx_psp_dl.o --output $@
+endif
 $(PSP_BASE_LINK_SCRIPT): $(PSP_LAYOUT_PLAN) $(PSP_LAYOUT_TOOL) $(PSPSDK)/lib/linkfile.prx Makefile
 	$(PYTHON) $(PSP_LAYOUT_TOOL) --plan $(PSP_LAYOUT_PLAN) --template $(PSPSDK)/lib/linkfile.prx --output $@ --build-dir $(BUILD_DIR) --library-dir $(N64PSP_DIR)/$(N64PSP_BUILD_PSP)
 

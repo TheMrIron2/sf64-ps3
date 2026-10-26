@@ -1,5 +1,6 @@
 #include "global.h"
 #include "src/psp/frame_interpolation.h"
+#include "src/psp/gu_census.h"
 #include "src/psp/profiler.h"
 #include "src/psp/renderer_starfield.h"
 
@@ -466,3 +467,15 @@ void PspFrameInterpolation_FinishPresentation(SPTask* task) {
     (void) state;
     (void) presentation;
 }
+
+#if PROFILE_CENSUS
+void PspCensus_Interpolation(void* task) {
+    s32 pool = psp_frame_interpolation_pool_for_task(task);
+    PspFrameInterpolationPresentation* presentation;
+    if (pool < 0) return;
+    presentation = &sPools[pool].presentation;
+    PspCensus_Event(2, presentation->requested, presentation->interpolated, presentation->exact,
+                    presentation->fallback, presentation->missingHistory, presentation->topologyMismatch,
+                    presentation->matricesInterpolated, presentation->repeated);
+}
+#endif

@@ -4,6 +4,7 @@
 #ifdef TARGET_PSP
 #include "global.h"
 #include "src/psp/frame_interpolation.h"
+#include "src/psp/gu_census.h"
 #include "src/psp/frame_scheduler.h"
 #include "src/psp/input.h"
 #include "src/psp/audio_mode.h"
@@ -368,7 +369,9 @@ static SPTask* Graphics_BuildSimulationTask(u32 simulationVi) {
     gSPSegment(gUnkDisp1++, 0, 0);
     gSPDisplayList(gMasterDisp++, gGfxPool->unkDL1);
     PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_GAME_UPDATE);
+    PspCensus_Simulation(0);
     Game_Update();
+    PspCensus_Simulation(1);
     PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_GAME_UPDATE);
     PspFrameInterpolation_EndSimulationFrame(gGfxTask, Graphics_InterpolationEligible());
     Graphics_FinalizeDisplayList();
@@ -471,8 +474,10 @@ static void Graphics_RunPspScheduler(SPTask* reusableTask, FrameBuffer* reusable
                 renderOnly = true;
             }
 
+            PspCensus_Prepare(0, renderOnly);
             inFlightDependency =
                 PspFrameInterpolation_PreparePresentation(task, currentVi, scheduler.presentationVIs);
+            PspCensus_Prepare(1, renderOnly);
             if (Graphics_SubmitTask(task) == 0) {
                 taskInFlight = true;
                 inFlightTask = task;
@@ -498,6 +503,9 @@ static void Graphics_RunPspScheduler(SPTask* reusableTask, FrameBuffer* reusable
         }
         PspRenderer_RecordSimulationTicks(simulationTicks);
 
+        PspCensus_Event(3, schedule.elapsedVIs, simulationTicks, schedule.presentationDue, renderOnly,
+                        schedule.missedSimulationDeadlines, schedule.missedPresentationDeadlines + submitFailed,
+                        scheduler.simulationVIs, scheduler.presentationVIs);
         PspProfiler_RecordTimingEvent(schedule.elapsedVIs, simulationTicks, schedule.presentationDue,
                                       renderOnly, schedule.missedSimulationDeadlines,
                                       schedule.missedPresentationDeadlines + submitFailed,

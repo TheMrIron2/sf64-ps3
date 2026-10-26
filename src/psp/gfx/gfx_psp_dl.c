@@ -12,6 +12,7 @@
 #include "src/psp/platform.h"
 #include "src/psp/profiler.h"
 #include "src/psp/renderer.h"
+#include "src/psp/gfx/gfx_psp_aquas_particles.h"
 #include "src/psp/renderer_starfield.h"
 #include "src/psp/zoness_water_cull.h"
 
@@ -6095,6 +6096,12 @@ static void psp_gfx_dl_set_hud_anchor(const Gfx* param) {
     PspGfxBackend_SetHudAnchor((s16) (param->words.w1 >> 16), (s16) param->words.w1);
 }
 
+static int psp_gfx_dl_run_internal(PspGfxDlContext* ctx, const Gfx* dl, u32 depth);
+
+#if PSP_FAST_AQUAS && PSP_GFX_BACKEND_GU
+#include "gfx_psp_aquas_particles.inc.c"
+#endif
+
 static int psp_gfx_dl_run_internal(PspGfxDlContext* ctx, const Gfx* dl, u32 depth) {
     const Gfx* pc = dl;
 
@@ -6187,6 +6194,12 @@ static int psp_gfx_dl_run_internal(PspGfxDlContext* ctx, const Gfx* dl, u32 dept
         }
 
         if ((opcode == G_NOOP) && PSP_RENDERER_DL_MARKER_MATCH(cmd->words.w1)) {
+#if PSP_FAST_AQUAS && PSP_GFX_BACKEND_GU
+            if (cmd->words.w1 == PSP_AQUAS_PARTICLE_MARKER) {
+                pc = psp_gfx_dl_aquas_particles(ctx, cmd, depth);
+                continue;
+            }
+#endif
             if (PSP_RENDERER_DL_MARKER_ID(cmd->words.w1) == PSP_RENDERER_DL_MARKER_STARFIELD) {
     psp_gfx_dl_pool_drain(ctx, PSP_PROFILE_FLUSH_RENDER_STATE_CHANGE);
                 PspStarfield_DrawPending();

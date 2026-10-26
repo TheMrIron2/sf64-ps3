@@ -5,7 +5,11 @@
 
 PSP_BOOTSTRAP_C_FILES := src/psp/main.c
 
-PSP_N64PSP_C_FILES := \
+ifeq ($(PROFILE_CENSUS),1)
+PSP_CENSUS_C_FILES := src/psp/gu_census.c
+endif
+
+PSP_N64PSP_C_FILES := $(PSP_CENSUS_C_FILES) \
     src/psp/n64psp_integration.c
 
 # Hardware-counter capture (PSP_Hardware_Audit.md, Primary Finding 1).
@@ -25,6 +29,7 @@ endif
 PSP_RENDERER_C_FILES := \
     src/psp/display.c \
     src/psp/settings.c \
+    src/psp/aquas_particles_emit.c \
     src/psp/menu.c \
     src/psp/overlay.c \
     src/psp/gfx/gfx_psp_backend_dispatch.c \
@@ -41,6 +46,10 @@ PSP_RENDERER_C_FILES += \
     src/psp/gfx/gfx_psp_device_pspgl.c \
     src/psp/gfx/gfx_pspgl.c \
     src/psp/gfx/gfx_pspgl_device.c
+endif
+
+ifeq ($(PSP_FAST_AQUAS)$(PSP_GFX_HAS_GU),11)
+PSP_RENDERER_C_FILES += src/psp/gfx/gfx_psp_aquas_particles.c
 endif
 
 ifneq ($(PSP_GFX_HAS_GU),0)

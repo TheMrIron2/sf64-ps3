@@ -4,6 +4,15 @@
 #include <n64psp/display.h>
 #include "src/psp/gfx/gfx_psp_backend.h"
 
+typedef enum {
+    PSP_GRAPHICS_ACCURATE,
+    PSP_GRAPHICS_FAST,
+} PspGraphicsQuality;
+
+int PspSettings_UseFastGraphics(void);
+PspGraphicsQuality PspSettings_GetGraphicsQuality(void);
+PspGraphicsQuality PspSettings_GetActiveGraphicsQuality(void);
+void PspSettings_SetGraphicsQuality(PspGraphicsQuality quality);
 void PspSettings_Init(const char* executablePath, PspGfxBackendKind buildDefault);
 PspGfxBackendKind PspSettings_GetGraphicsBackend(void);
 int PspSettings_SetGraphicsBackend(PspGfxBackendKind backend);

@@ -1,8 +1,10 @@
 #include "src/psp/settings.h"
+#include "src/psp/aquas_particles.h"
 #include "src/psp/display.h"
 #include "src/psp/frame_scheduler.h"
 #include "src/psp/frame_interpolation.h"
 
+#include <stdio.h>
 #include <pspiofilemgr.h>
 #include <pspiofilemgr_fcntl.h>
 
@@ -12,6 +14,11 @@ static char sSettingsPath[PSP_SETTINGS_PATH_SIZE] = "sf64-settings.cfg";
 static PspGfxBackendKind sGraphicsBackend = PSP_GFX_KIND_GU;
 static PspGfxBackendKind sActiveGraphicsBackend = PSP_GFX_KIND_GU;
 static int sBackendSaveFailed;
+static int sRecoveredBackup;
+static PspGraphicsQuality sGraphicsQuality;
+static PspGraphicsQuality sActiveGraphicsQuality;
+static int sQualityPending;
+static char sExtraSettings[384];
 
 static int sDisplayMode = -1;
 static int sPresentationHz;
@@ -23,6 +30,21 @@ static int sTogglePerformance;
 static int psp_settings_equal(const char* a, const char* b) {
     while (*a && *a == *b) { a++; b++; }
     return *a == *b;
+}
+
+static int psp_settings_prefix(const char* text, const char* prefix) {
+    while (*prefix) if (*text++ != *prefix++) return 0;
+    return 1;
+}
+
+static int psp_settings_assignment(const char* text) {
+    while (*text) if (*text++ == '=') return 1;
+    return 0;
+}
+
+static void psp_settings_copy(char* output, const char* input, unsigned bytes) {
+    unsigned i;
+    for (i = 0; i < bytes; i++) output[i] = input[i];
 }
 
 static void psp_settings_copy_path(char* output, unsigned capacity, const char* input, unsigned length) {
@@ -57,39 +79,65 @@ static void psp_settings_suffix(char* output, const char* suffix) {
     output[i] = 0;
 }
 
-static int psp_settings_read_backend(const char* path, PspGfxBackendKind* backend) {
-    static const char gu[] = "version=1\ngraphics_backend=gu\n";
-    static const char pspgl[] = "version=1\ngraphics_backend=pspgl\n";
-    char data[40];
+static int psp_settings_read(const char* path) {
+    char data[512], extras[sizeof(sExtraSettings)];
+    PspGfxBackendKind backend = sGraphicsBackend;
+    PspGraphicsQuality quality = PSP_GRAPHICS_ACCURATE;
+    unsigned version = 0, seenBackend = 0, seenQuality = 0, extraBytes = 0, i, begin;
     SceUID fd = sceIoOpen(path, PSP_O_RDONLY, 0);
     int bytes;
 
     if (fd < 0) return 0;
     bytes = sceIoRead(fd, data, sizeof(data) - 1);
     sceIoClose(fd);
-    if (bytes < 0 || bytes >= (int) sizeof(data)) return 0;
+    if (bytes <= 0 || bytes >= (int) sizeof(data) - 1) return 0;
     data[bytes] = 0;
-    if (bytes == (int) sizeof(gu) - 1 && psp_settings_equal(data, gu)) {
-        *backend = PSP_GFX_KIND_GU;
-        return 1;
+    for (begin = 0; begin < (unsigned) bytes; begin = i + 1) {
+        for (i = begin; i < (unsigned) bytes && data[i] != '\n'; i++) {
+            if (data[i] == 0 || data[i] == '\r') return 0;
+        }
+        if (i == (unsigned) bytes) return 0;
+        data[i] = 0;
+        if (psp_settings_prefix(data + begin, "version=")) {
+            if (version || (!psp_settings_equal(data + begin + 8, "1") &&
+                            !psp_settings_equal(data + begin + 8, "2"))) return 0;
+            version = data[begin + 8] - '0';
+        } else if (psp_settings_prefix(data + begin, "graphics_backend=")) {
+            if (seenBackend++) return 0;
+            if (psp_settings_equal(data + begin + 17, "gu")) backend = PSP_GFX_KIND_GU;
+            else if (psp_settings_equal(data + begin + 17, "pspgl")) backend = PSP_GFX_KIND_PSPGL;
+            else return 0;
+        } else if (psp_settings_prefix(data + begin, "graphics_quality=")) {
+            if (!seenQuality++ && psp_settings_equal(data + begin + 17, "fast")) quality = PSP_GRAPHICS_FAST;
+            else quality = PSP_GRAPHICS_ACCURATE;
+        } else if (i != begin) {
+            unsigned length = i - begin;
+            if ( !psp_settings_assignment(data + begin) || extraBytes + length + 1 >= sizeof(extras)) return 0;
+            psp_settings_copy(extras + extraBytes, data + begin, length);
+            extraBytes += length;
+            extras[extraBytes++] = '\n';
+        }
     }
-    if (bytes == (int) sizeof(pspgl) - 1 && psp_settings_equal(data, pspgl)) {
-        *backend = PSP_GFX_KIND_PSPGL;
-        return 1;
-    }
-    return 0;
+    if (!version || !seenBackend) return 0;
+    extras[extraBytes] = 0;
+    sGraphicsBackend = backend;
+    sGraphicsQuality = quality;
+    psp_settings_copy(sExtraSettings, extras, extraBytes + 1);
+    return 1;
 }
 
 static int psp_settings_save_backend(PspGfxBackendKind backend) {
     char temporary[PSP_SETTINGS_PATH_SIZE];
     char backup[PSP_SETTINGS_PATH_SIZE];
-    const char* data = backend == PSP_GFX_KIND_PSPGL ?
-        "version=1\ngraphics_backend=pspgl\n" : "version=1\ngraphics_backend=gu\n";
+    char data[512];
     unsigned length = 0;
     int hadPrevious = 0;
     int writeResult;
     SceUID fd;
 
+    snprintf(data, sizeof(data), "version=2\ngraphics_backend=%s\ngraphics_quality=%s\n%s",
+             backend == PSP_GFX_KIND_PSPGL ? "pspgl" : "gu",
+             sGraphicsQuality == PSP_GRAPHICS_FAST ? "fast" : "accurate", sExtraSettings);
     psp_settings_suffix(temporary, ".tmp");
     psp_settings_suffix(backup, ".bak");
     sceIoRemove(temporary);
@@ -103,7 +151,13 @@ static int psp_settings_save_backend(PspGfxBackendKind backend) {
     }
 
     fd = sceIoOpen(sSettingsPath, PSP_O_RDONLY, 0);
-    if (fd >= 0) {
+    if (fd >= 0 && sRecoveredBackup) {
+        sceIoClose(fd);
+        if (sceIoRemove(sSettingsPath) < 0) {
+            sceIoRemove(temporary);
+            return 0;
+        }
+    } else if (fd >= 0) {
         sceIoClose(fd);
         sceIoRemove(backup);
         if (sceIoRename(sSettingsPath, backup) < 0) {
@@ -117,7 +171,8 @@ static int psp_settings_save_backend(PspGfxBackendKind backend) {
         sceIoRemove(temporary);
         return 0;
     }
-    if (hadPrevious) sceIoRemove(backup);
+    if (hadPrevious || sRecoveredBackup) sceIoRemove(backup);
+    sRecoveredBackup = 0;
     return 1;
 }
 
@@ -129,12 +184,37 @@ void PspSettings_Init(const char* executablePath, PspGfxBackendKind buildDefault
     sGraphicsBackend = buildDefault;
     sActiveGraphicsBackend = buildDefault;
     sBackendSaveFailed = 0;
+    sRecoveredBackup = 0;
+    sGraphicsQuality = PSP_GRAPHICS_ACCURATE;
+    sQualityPending = 0;
+    sExtraSettings[0] = 0;
     psp_settings_suffix(backup, ".bak");
     psp_settings_suffix(temporary, ".tmp");
-    if (!psp_settings_read_backend(sSettingsPath, &sGraphicsBackend) &&
-        !psp_settings_read_backend(backup, &sGraphicsBackend)) {
-        psp_settings_read_backend(temporary, &sGraphicsBackend);
+    if (!psp_settings_read(sSettingsPath)) {
+        if (psp_settings_read(backup)) sRecoveredBackup = 1;
+        else psp_settings_read(temporary);
     }
+    sActiveGraphicsQuality = sGraphicsQuality;
+}
+
+int PspSettings_UseFastGraphics(void) {
+    return sActiveGraphicsBackend == PSP_GFX_KIND_GU &&
+           sActiveGraphicsQuality == PSP_GRAPHICS_FAST;
+}
+
+PspGraphicsQuality PspSettings_GetGraphicsQuality(void) {
+    return sGraphicsQuality;
+}
+
+PspGraphicsQuality PspSettings_GetActiveGraphicsQuality(void) {
+    return sActiveGraphicsQuality;
+}
+
+void PspSettings_SetGraphicsQuality(PspGraphicsQuality quality) {
+    if (quality != PSP_GRAPHICS_ACCURATE && quality != PSP_GRAPHICS_FAST) return;
+    if (quality == sGraphicsQuality && !sBackendSaveFailed) return;
+    sGraphicsQuality = quality;
+    sQualityPending = 1;
 }
 
 PspGfxBackendKind PspSettings_GetGraphicsBackend(void) {
@@ -174,7 +254,7 @@ void PspSettings_SetPresentationHz(int hz) {
 }
 
 int PspSettings_NeedsBoundary(void) {
-    return sDisplayMode >= 0 || sPresentationHz != 0
+    return sDisplayMode >= 0 || sPresentationHz != 0 || sQualityPending
 #if PSP_FPS_OVERLAY
            || sTogglePerformance
 #endif
@@ -183,6 +263,15 @@ int PspSettings_NeedsBoundary(void) {
 
 // Called before simulation generation with the previous graphics task complete
 void PspSettings_Apply(void) {
+    if (sQualityPending) {
+        if (sActiveGraphicsQuality != sGraphicsQuality) {
+            sActiveGraphicsQuality = sGraphicsQuality;
+            PspFrameInterpolation_Reset();
+            PspGfxBackend_ReplayCacheInvalidate();
+        }
+        sBackendSaveFailed = !psp_settings_save_backend(sGraphicsBackend);
+        sQualityPending = 0;
+    }
 #if PSP_FPS_OVERLAY
     if (sTogglePerformance) {
         sPerformanceVisible = !sPerformanceVisible;

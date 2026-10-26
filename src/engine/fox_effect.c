@@ -5,6 +5,9 @@
  */
 
 #include "global.h"
+#ifdef TARGET_PSP
+#include "src/psp/aquas_particles.h"
+#endif
 #include "assets/ast_blue_marine.h"
 #include "assets/ast_arwing.h"
 #include "assets/ast_bg_space.h"
@@ -442,6 +445,9 @@ void Effect_SmallRock_Draw(EffectSmallRock* this) {
             break;
 
         case LEVEL_AQUAS:
+#if defined(TARGET_PSP) && PSP_FAST_AQUAS
+            if (PspAquasParticles_TryEmit(this->scale2, this->index, (s32) this->scale1)) break;
+#endif
             RCP_SetupDL(&gMasterDisp, SETUPDL_67);
             temp_ft3 = Math_ModF(this->index, 4.0f);
             gDPSetPrimColor(gMasterDisp++, 0, 0, 255, 255, 255, (s32) this->scale1);

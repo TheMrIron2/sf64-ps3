@@ -1038,3 +1038,41 @@ direct-call MTX handler slot from 1408 to 1472 bytes for its 1424-byte function;
 its pinned end moves 128 bytes from the original GU plan. Hardware A/B timing
 and PSP-1000 heap measurements are still required before claiming GU
 performance parity.
+
+The [matched-build 60 Hz census](codex/gu_60hz_census.md) finds current Run slots
+are 768 bytes in both plans; standalone's larger matrix slot moves 122 later
+section starts by 64 bytes relative to unified. Unified also outlines the HUD
+anchor helper and changes several frontend bodies. These are host findings,
+not evidence that dispatch or I-cache explains the remembered Title delta.
+Phase/hardware-counter builds disable production pins and scratchpad execution;
+use clean A/B binaries for parity and the optional coarse census for delivery
+accounting. Render-only tasks still traverse Fast3D, while missing-history
+fallbacks can deliberately keep the displayed image without rendering a task.
+Completed buffer swaps are not physical scanout timestamps.
+
+
+The [Aquas Fast graphics candidate](codex/psp_fast_graphics_aquas.md) replaces only
+Aquas effect 346 in optional GU Fast mode. Capture 000 from 25 October has a
+10.339 ms effect mean in its first 300 tasks, but 4.915 ms across all 1789 tasks;
+those scoped diagnostic times are not recoverable production savings. The orb
+is already a quad: ordered native runs target repeated interpretation/state work.
+Keep frame-owned interpolated matrices, the four tints and opacity, then restore
+inherited material and vertex state. Diagnostic tags split runs, so price clean
+batching separately. Accurate/Fast and a separate skip build were prepared for PSP acceptance.
+
+The first owner Fast screen submitted 85 particles in 14 draws without fallback,
+but displayed no flecks. Native UVs were incorrectly in pixels; the existing GU
+vertex contract uses normalized coordinates, so clamp sampling hit transparent
+atlas edges. Correct U/128 and V/32 and test actual-texture sample alpha, not just
+vertex counts. The invisible candidate's timing reduction is not acceptance.
+
+The corrected 26 October owner screen accepts the Aquas substitution: matching
+visuals, Accurate 42.5 FPS / 21.3 ms versus Fast 57.9 FPS / 15.6 ms, P99 D4 F0 O0.
+This is a 5.7 ms gain in that view, with 99 particles in four native draws and no
+fallback or capacity failure. Keep the frozen accepted EBOOT; neither the older
+invisible screen nor a single rounded result establishes a sustained 60 Hz lock.
+Do not expand Fast mode to other effects without their own evidence.
+
+After acceptance, remove Aquas overlay counters, per-task particle statistics,
+capture exports and the diagnostic skip switch. Keep the accepted binary for
+comparison and recheck the clean candidate in the same view on hardware.

@@ -211,11 +211,20 @@ static inline int PspGfxBackend_IsGu(void) {
 }
 
 #if defined(PSP_GFX_BACKEND_DIRECT_CALLS) && PSP_GFX_BACKEND_GU && !PSP_GFX_BACKEND_PSPGL
-#define PSP_GFX_BACKEND_CALL(name, arguments) PspGfxBackendGu_##name arguments
+#define PSP_GFX_BACKEND_RAW_CALL(name, arguments) PspGfxBackendGu_##name arguments
 #elif defined(PSP_GFX_BACKEND_DIRECT_CALLS) && PSP_GFX_BACKEND_PSPGL && !PSP_GFX_BACKEND_GU
-#define PSP_GFX_BACKEND_CALL(name, arguments) PspGfxBackendPspgl_##name arguments
+#define PSP_GFX_BACKEND_RAW_CALL(name, arguments) PspGfxBackendPspgl_##name arguments
 #elif PSP_GFX_BACKEND_GU && PSP_GFX_BACKEND_PSPGL
-#define PSP_GFX_BACKEND_CALL(name, arguments) gPspGfxBackendOps->name arguments
+#define PSP_GFX_BACKEND_RAW_CALL(name, arguments) gPspGfxBackendOps->name arguments
+#endif
+
+#if PROFILE_CENSUS_DISPATCH
+void PspCensus_Dispatch(unsigned index);
+#define PSP_GFX_BACKEND_CALL(name, arguments) \
+    (PspCensus_Dispatch(offsetof(PspGfxBackendOps, name) / sizeof(void (*)(void))), \
+     PSP_GFX_BACKEND_RAW_CALL(name, arguments))
+#else
+#define PSP_GFX_BACKEND_CALL(name, arguments) PSP_GFX_BACKEND_RAW_CALL(name, arguments)
 #endif
 
 #if defined(PSP_GFX_BACKEND_DIRECT_CALLS) || (PSP_GFX_BACKEND_GU && PSP_GFX_BACKEND_PSPGL)
