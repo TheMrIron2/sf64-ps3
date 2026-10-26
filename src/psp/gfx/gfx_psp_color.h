@@ -6,6 +6,7 @@
 extern u8 gPspGfxColorTransferLut[256];
 
 void PspGfxColor_Init(void);
+int PspGfxColor_IsFinite(float value);
 
 static inline u8 psp_gfx_color_transfer_u8(u8 value) {
     return gPspGfxColorTransferLut[value];

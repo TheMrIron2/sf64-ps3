@@ -2387,19 +2387,30 @@ static int psp_gfx_dl_batch_covers_screen(const PspGfxVertex* vertices, u32 coun
     return minX <= -0.99f && maxX >= 0.99f && minY <= -0.99f && maxY >= 0.99f;
 }
 
-static PspGfxViewportPolicy psp_gfx_dl_resolve_viewport(const PspGfxDlContext* ctx, const PspGfxVertex* vertices,
-                                                        u32 count, const float* projection) {
+static PspGfxViewportPolicy __attribute__((noinline)) psp_gfx_dl_resolve_viewport(const PspGfxDlContext* ctx,
+                                                                                   const PspGfxVertex* vertices,
+                                                                                   u32 count,
+                                                                                   const float* projection) {
     if (ctx->viewportPolicy != PSP_GFX_VIEWPORT_AUTO) {
         return ctx->viewportPolicy;
     }
     if (projection == NULL) {
         return psp_gfx_dl_batch_covers_screen(vertices, count) ? PSP_GFX_VIEWPORT_FULL : PSP_GFX_VIEWPORT_CENTERED_UI;
     }
+    if (!PspGfxColor_IsFinite(projection[15])) {
+        return PSP_GFX_VIEWPORT_FULL;
+    }
     if (fabsf(projection[15]) > 0.5f) {
         return PSP_GFX_VIEWPORT_CENTERED_UI;
     }
-    return (projection[0] != 0.0f && fabsf(projection[5] / projection[0]) < 1.5f) ? PSP_GFX_VIEWPORT_CENTERED_UI
-                                                                                  : PSP_GFX_VIEWPORT_FULL;
+    if (!PspGfxColor_IsFinite(projection[0]) || (projection[0] == 0.0f)) {
+        return PSP_GFX_VIEWPORT_FULL;
+    }
+    if (!PspGfxColor_IsFinite(projection[5])) {
+        return PSP_GFX_VIEWPORT_FULL;
+    }
+    return (fabsf(projection[5] / projection[0]) < 1.5f) ? PSP_GFX_VIEWPORT_CENTERED_UI
+                                                          : PSP_GFX_VIEWPORT_FULL;
 }
 
 static void psp_gfx_dl_flush_reason(PspGfxDlContext* ctx, PspProfileFlushReason reason) {
