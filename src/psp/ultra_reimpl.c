@@ -18,28 +18,21 @@
 #include "macros.h"
 #include "src/psp/audio_output.h"
 #include "src/psp/platform.h"
+#include "src/psp/eeprom_store.h"
+#include "src/psp/time_conversion.h"
+#include "src/psp/timer_core.h"
 
 #include <pspdebug.h>
 #include <pspintrman.h>
 #include <pspkernel.h>
 #include <psprtc.h>
+#include <pspiofilemgr.h>
+#include <pspiofilemgr_fcntl.h>
 #include <stdio.h>
 
-#define PSP_N64_TICKS_PER_SECOND 46875000ULL
-#define PSP_TIMER_POOL_SIZE 32
 #define PSP_N64_THREAD_STACK_SIZE 0x10000
 
 u64 osClockRate = PSP_N64_TICKS_PER_SECOND;
-
-typedef struct PspTimer {
-    OSTimer* owner;
-    SceUID threadId;
-    OSTime countdown;
-    OSTime interval;
-    OSMesgQueue* mq;
-    OSMesg msg;
-    volatile int active;
-} PspTimer;
 
 typedef struct PspThread {
     OSThread* owner;
@@ -49,7 +42,16 @@ typedef struct PspThread {
     volatile int active;
 } PspThread;
 
-static PspTimer sTimers[PSP_TIMER_POOL_SIZE];
+static PspTimerCore sTimerCore;
+static SceUID sTimerLock = -1;
+static SceUID sTimerWake = -1;
+static SceUID sTimerThread = -1;
+static int sTimerReady;
+static PspEepromStore sEeprom;
+static char sEepromPath[256] = "sf64-eeprom.bin";
+static int sEepromReady;
+static SceUID sEepromLock = -1;
+static SceUID sEepromTransactionOwner = -1;
 static PspThread sThreads[16];
 static OSTask* sLoadedTask;
 
@@ -96,8 +98,73 @@ static void psp_memcpy(void* dst, const void* src, u32 size) {
     }
 }
 
-static u32 ticks_to_usecs(OSTime ticks) {
-    return (u32) ((ticks * 1000000ULL) / PSP_N64_TICKS_PER_SECOND);
+static void* psp_eeprom_open(const char* path, int mode) {
+    int flags = mode ? PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC : PSP_O_RDONLY;
+    SceUID fd = sceIoOpen(path, flags, 0666);
+    return fd < 0 ? NULL : (void*) (long) (fd + 1);
+}
+
+static int psp_eeprom_read(void* file, void* data, unsigned size) {
+    return sceIoRead((SceUID) ((long) file - 1), data, size);
+}
+
+static int psp_eeprom_write(void* file, const void* data, unsigned size) {
+    return sceIoWrite((SceUID) ((long) file - 1), data, size);
+}
+
+static int psp_eeprom_close(void* file) {
+    return sceIoClose((SceUID) ((long) file - 1));
+}
+
+static int psp_eeprom_rename(const char* from, const char* to) {
+    return sceIoRename(from, to);
+}
+
+static int psp_eeprom_remove(const char* path) {
+    return sceIoRemove(path);
+}
+
+static int psp_eeprom_exists(const char* path) {
+    SceIoStat stat;
+    return sceIoGetstat(path, &stat) >= 0;
+}
+
+static const PspEepromFileOps sEepromFileOps = {
+    psp_eeprom_open, psp_eeprom_read, psp_eeprom_write,
+    psp_eeprom_close, psp_eeprom_rename, psp_eeprom_remove, psp_eeprom_exists
+};
+
+void PspEeprom_SetExecutablePath(const char* executablePath) {
+    unsigned length = 0, separator = 0, i;
+    static const char filename[] = "sf64-eeprom.bin";
+    if (!executablePath) return;
+    while (executablePath[length] && length < sizeof(sEepromPath)) {
+        if (executablePath[length] == '/' || executablePath[length] == '\\') separator = length + 1;
+        length++;
+    }
+    if (length >= sizeof(sEepromPath) || separator + sizeof(filename) > sizeof(sEepromPath)) return;
+    for (i = 0; i < separator; i++) sEepromPath[i] = executablePath[i];
+    for (i = 0; i < sizeof(filename); i++) sEepromPath[separator + i] = filename[i];
+    sEepromReady = 0;
+}
+
+static int psp_eeprom_init(void) {
+    if (sEepromReady) return 1;
+    sEepromReady = PspEepromStore_Init(&sEeprom, &sEepromFileOps, sEepromPath);
+    if (sEepromReady && sEepromLock < 0) sEepromLock = sceKernelCreateSema("n64_eeprom", 0, 1, 1, NULL);
+    if (sEepromLock < 0) sEepromReady = 0;
+    return sEepromReady;
+}
+
+static int psp_eeprom_enter(void) {
+    SceUID threadId;
+    if (!psp_eeprom_init()) return 0;
+    threadId = sceKernelGetThreadId();
+    return sEepromTransactionOwner == threadId || sceKernelWaitSema(sEepromLock, 1, NULL) >= 0;
+}
+
+static void psp_eeprom_leave(void) {
+    if (sEepromTransactionOwner != sceKernelGetThreadId()) sceKernelSignalSema(sEepromLock, 1);
 }
 
 static s32 psp_thread_priority_from_os(OSPri pri) {
@@ -114,88 +181,88 @@ static s32 psp_thread_priority_from_os(OSPri pri) {
     return pspLowest - ((pri * (pspLowest - pspHighest)) / OS_PRIORITY_MAX);
 }
 
-static int psp_timer_thread(SceSize args, void* argp) {
-    PspTimer* timer;
-
-    if ((args != sizeof(timer)) || (argp == NULL)) {
-        pspDebugScreenPrintf("[psp] bad timer args %u %p\n", (unsigned) args, argp);
-        return -1;
-    }
-
-    timer = *(PspTimer**) argp;
-    if (timer == NULL) {
-        pspDebugScreenPrintf("[psp] null timer arg\n");
-        return -1;
-    }
-
-    while (timer->active) {
-        sceKernelDelayThread(ticks_to_usecs(timer->countdown));
-        if (!timer->active) {
-            break;
+static int psp_timer_scheduler(SceSize args, void* argp) {
+    (void) args;
+    (void) argp;
+    for (;;) {
+        u64 now;
+        u64 nearest = 0;
+        int due, hasTimers;
+        PspTimerCoreDispatch dispatch;
+        unsigned int timeout;
+        sceKernelWaitSema(sTimerLock, 1, NULL);
+        now = sceKernelGetSystemTimeWide();
+        due = PspTimerCore_TakeDue(&sTimerCore, now, &dispatch);
+        hasTimers = due || PspTimerCore_NextDeadline(&sTimerCore, &nearest);
+        sceKernelSignalSema(sTimerLock, 1);
+        if (due) {
+            sceKernelWaitSema(sTimerLock, 1, NULL);
+            if (PspTimerCore_DispatchValid(&sTimerCore, &dispatch)) {
+                if (dispatch.queue != NULL) osSendMesg((OSMesgQueue*) dispatch.queue, (OSMesg) dispatch.message, OS_MESG_NOBLOCK);
+                PspTimerCore_Complete(&sTimerCore, &dispatch);
+            }
+            sceKernelSignalSema(sTimerLock, 1);
+            continue;
         }
-        if (timer->mq != NULL) {
-            osSendMesg(timer->mq, timer->msg, OS_MESG_NOBLOCK);
-        }
-        if (timer->interval == 0) {
-            timer->active = 0;
+        if (!hasTimers) {
+            sceKernelWaitSema(sTimerWake, 1, NULL);
         } else {
-            timer->countdown = timer->interval;
+            now = sceKernelGetSystemTimeWide();
+            timeout = (unsigned int) ((nearest <= now) ? 1 : (nearest - now > 0xFFFFFFFFULL ? 0xFFFFFFFFU : nearest - now));
+            (void) sceKernelWaitSema(sTimerWake, 1, &timeout);
         }
     }
-
     return 0;
 }
 
+static void psp_timer_init(void) {
+    if (sTimerReady) return;
+    sTimerLock = sceKernelCreateSema("n64_timer_lock", 0, 1, 1, NULL);
+    sTimerWake = sceKernelCreateSema("n64_timer_wake", 0, 0, 1, NULL);
+    if (sTimerLock < 0 || sTimerWake < 0) goto fail;
+    sTimerThread = sceKernelCreateThread("n64_timer_sched", psp_timer_scheduler, 0x18, 0x1000,
+                                         PSP_THREAD_ATTR_USER, NULL);
+    if (sTimerThread < 0 || sceKernelStartThread(sTimerThread, 0, NULL) < 0) goto fail;
+    sTimerReady = 1;
+    return;
+fail:
+    if (sTimerThread >= 0) sceKernelDeleteThread(sTimerThread);
+    if (sTimerWake >= 0) sceKernelDeleteSema(sTimerWake);
+    if (sTimerLock >= 0) sceKernelDeleteSema(sTimerLock);
+    sTimerThread = sTimerWake = sTimerLock = -1;
+}
+
 int osSetTimer(OSTimer* timer, OSTime countdown, OSTime interval, OSMesgQueue* mq, OSMesg msg) {
-    s32 i;
-
-    for (i = 0; i < PSP_TIMER_POOL_SIZE; i++) {
-        if (!sTimers[i].active) {
-            psp_memzero(&sTimers[i], sizeof(sTimers[i]));
-            sTimers[i].owner = timer;
-            sTimers[i].countdown = countdown;
-            sTimers[i].interval = interval;
-            sTimers[i].mq = mq;
-            sTimers[i].msg = msg;
-            sTimers[i].active = 1;
-            sTimers[i].threadId = sceKernelCreateThread("n64_timer", psp_timer_thread, 0x18, 0x1000, 0, NULL);
-            if (sTimers[i].threadId < 0) {
-                sTimers[i].active = 0;
-                return -1;
-            }
-            {
-                PspTimer* timerArg = &sTimers[i];
-                sceKernelStartThread(sTimers[i].threadId, sizeof(timerArg), &timerArg);
-            }
-            return 0;
-        }
-    }
-
-    return -1;
+    u64 now, delayUs;
+    u64 intervalUs;
+    int slot;
+    if (!timer || !sTimerReady) return -1;
+    sceKernelWaitSema(sTimerLock, 1, NULL);
+    now = sceKernelGetSystemTimeWide();
+    delayUs = PspTime_N64TicksToUsecs(countdown);
+    intervalUs = PspTime_N64TicksToUsecs(interval);
+    if (countdown && delayUs == 0) delayUs = 1;
+    if (interval && intervalUs == 0) intervalUs = 1;
+    slot = PspTimerCore_Register(&sTimerCore, timer, ~0ULL - now < delayUs ? ~0ULL : now + delayUs,
+                                 intervalUs, mq, msg);
+    sceKernelSignalSema(sTimerLock, 1);
+    if (slot < 0) return -1;
+    sceKernelSignalSema(sTimerWake, 1);
+    return 0;
 }
 
 int osStopTimer(OSTimer* timer) {
-    s32 i;
-
-    for (i = 0; i < PSP_TIMER_POOL_SIZE; i++) {
-        if (sTimers[i].owner == timer) {
-            sTimers[i].active = 0;
-            if (sTimers[i].threadId >= 0) {
-                sceKernelTerminateDeleteThread(sTimers[i].threadId);
-            }
-            psp_memzero(&sTimers[i], sizeof(sTimers[i]));
-            return 0;
-        }
-    }
-
-    return -1;
+    int found;
+    if (!timer || !sTimerReady) return -1;
+    sceKernelWaitSema(sTimerLock, 1, NULL);
+    found = PspTimerCore_Cancel(&sTimerCore, timer);
+    sceKernelSignalSema(sTimerLock, 1);
+    sceKernelSignalSema(sTimerWake, 1);
+    return found ? 0 : -1;
 }
 
 OSTime osGetTime(void) {
-    u64 ticks;
-
-    sceRtcGetCurrentTick(&ticks);
-    return (OSTime) ((ticks * PSP_N64_TICKS_PER_SECOND) / sceRtcGetTickResolution());
+    return (OSTime) PspTime_UsecsToN64Ticks(sceKernelGetSystemTimeWide());
 }
 
 void osSetTime(OSTime time) {
@@ -351,11 +418,13 @@ void osViSetEvent(OSMesgQueue* mq, OSMesg msg, u32 retraceCount) {
 
 void osInitialize(void) {
     osTvType = OS_TV_NTSC;
+    psp_timer_init();
+    psp_eeprom_init();
 }
 
 s32 osEepromProbe(OSMesgQueue* mq) {
     (void) mq;
-    return 1;
+    return psp_eeprom_init() ? 1 : 0;
 }
 
 s32 osEepromRead(OSMesgQueue* mq, u8 address, u8* buffer) {
@@ -367,18 +436,45 @@ s32 osEepromWrite(OSMesgQueue* mq, u8 address, u8* buffer) {
 }
 
 s32 osEepromLongRead(OSMesgQueue* mq, u8 address, u8* buffer, int nbytes) {
+    s32 result;
     (void) mq;
-    (void) address;
-    psp_memzero(buffer, nbytes);
-    return 0;
+    if (!psp_eeprom_enter()) return -1;
+    result = PspEepromStore_Read(&sEeprom, address, buffer, nbytes);
+    psp_eeprom_leave();
+    return result;
 }
 
 s32 osEepromLongWrite(OSMesgQueue* mq, u8 address, u8* buffer, int nbytes) {
+    s32 result;
     (void) mq;
-    (void) address;
-    (void) buffer;
-    (void) nbytes;
-    return 0;
+    if (!psp_eeprom_enter()) return -1;
+    result = PspEepromStore_Write(&sEeprom, address, buffer, nbytes);
+    psp_eeprom_leave();
+    return result;
+}
+
+int PspEeprom_BeginTransaction(void) {
+    if (!psp_eeprom_init() || sEepromTransactionOwner == sceKernelGetThreadId() ||
+        sceKernelWaitSema(sEepromLock, 1, NULL) < 0) return 0;
+    if (!PspEepromStore_Begin(&sEeprom)) { sceKernelSignalSema(sEepromLock, 1); return 0; }
+    sEepromTransactionOwner = sceKernelGetThreadId();
+    return 1;
+}
+
+int PspEeprom_CommitTransaction(void) {
+    int ok;
+    if (sEepromTransactionOwner != sceKernelGetThreadId()) return 0;
+    ok = PspEepromStore_Commit(&sEeprom);
+    sEepromTransactionOwner = -1;
+    sceKernelSignalSema(sEepromLock, 1);
+    return ok;
+}
+
+void PspEeprom_AbortTransaction(void) {
+    if (sEepromTransactionOwner != sceKernelGetThreadId()) return;
+    PspEepromStore_Abort(&sEeprom);
+    sEepromTransactionOwner = -1;
+    sceKernelSignalSema(sEepromLock, 1);
 }
 
 s32 osContStartReadData(OSMesgQueue* mq) {

@@ -3,6 +3,7 @@
 #include "src/psp/display.h"
 #include "src/psp/frame_scheduler.h"
 #include "src/psp/frame_interpolation.h"
+#include "src/psp/settings_path.h"
 
 #include <stdio.h>
 #include <pspiofilemgr.h>
@@ -11,6 +12,7 @@
 #define PSP_SETTINGS_PATH_SIZE 256
 
 static char sSettingsPath[PSP_SETTINGS_PATH_SIZE] = "sf64-settings.cfg";
+static int sSettingsPathValid = 1;
 static PspGfxBackendKind sGraphicsBackend = PSP_GFX_KIND_GU;
 static PspGfxBackendKind sActiveGraphicsBackend = PSP_GFX_KIND_GU;
 static int sBackendSaveFailed;
@@ -47,36 +49,22 @@ static void psp_settings_copy(char* output, const char* input, unsigned bytes) {
     for (i = 0; i < bytes; i++) output[i] = input[i];
 }
 
-static void psp_settings_copy_path(char* output, unsigned capacity, const char* input, unsigned length) {
-    unsigned i;
-    if (length + 1 > capacity) return;
-    for (i = 0; i < length; i++) output[i] = input[i];
-    output[length] = 0;
-}
-
 static void psp_settings_set_path(const char* executablePath) {
-    unsigned length = 0, separator = 0, i;
     static const char filename[] = "sf64-settings.cfg";
 
-    if (executablePath == NULL) return;
-    while (executablePath[length] && length < PSP_SETTINGS_PATH_SIZE) {
-        if (executablePath[length] == '/' || executablePath[length] == '\\') separator = length + 1;
-        length++;
+    sSettingsPathValid = 1;
+    if (executablePath == NULL) {
+        static const char fallback[] = "sf64-settings.cfg";
+        unsigned i;
+        for (i = 0; i < sizeof(fallback); i++) sSettingsPath[i] = fallback[i];
+        return;
     }
-    if (length >= PSP_SETTINGS_PATH_SIZE || separator + sizeof(filename) > PSP_SETTINGS_PATH_SIZE) return;
-    for (i = 0; i < separator; i++) sSettingsPath[i] = executablePath[i];
-    psp_settings_copy_path(sSettingsPath + separator, PSP_SETTINGS_PATH_SIZE - separator,
-                           filename, sizeof(filename) - 1);
+    sSettingsPathValid = PspSettingsPath_FromExecutable(sSettingsPath, sizeof(sSettingsPath), executablePath, filename);
 }
 
-static void psp_settings_suffix(char* output, const char* suffix) {
-    unsigned i = 0;
-    while (sSettingsPath[i] && i < PSP_SETTINGS_PATH_SIZE - 8) {
-        output[i] = sSettingsPath[i];
-        i++;
-    }
-    while (*suffix && i < PSP_SETTINGS_PATH_SIZE - 1) output[i++] = *suffix++;
-    output[i] = 0;
+static int psp_settings_suffix(char* output, const char* suffix) {
+    return sSettingsPathValid &&
+           PspSettingsPath_AppendSuffix(output, PSP_SETTINGS_PATH_SIZE, sSettingsPath, suffix);
 }
 
 static int psp_settings_read(const char* path) {
@@ -135,11 +123,11 @@ static int psp_settings_save_backend(PspGfxBackendKind backend) {
     int writeResult;
     SceUID fd;
 
+    if (!psp_settings_suffix(temporary, ".tmp") || !psp_settings_suffix(backup, ".bak")) return 0;
+
     snprintf(data, sizeof(data), "version=2\ngraphics_backend=%s\ngraphics_quality=%s\n%s",
              backend == PSP_GFX_KIND_PSPGL ? "pspgl" : "gu",
              sGraphicsQuality == PSP_GRAPHICS_FAST ? "fast" : "accurate", sExtraSettings);
-    psp_settings_suffix(temporary, ".tmp");
-    psp_settings_suffix(backup, ".bak");
     sceIoRemove(temporary);
     fd = sceIoOpen(temporary, PSP_O_WRONLY | PSP_O_CREAT | PSP_O_TRUNC, 0666);
     if (fd < 0) return 0;
@@ -188,9 +176,9 @@ void PspSettings_Init(const char* executablePath, PspGfxBackendKind buildDefault
     sGraphicsQuality = PSP_GRAPHICS_ACCURATE;
     sQualityPending = 0;
     sExtraSettings[0] = 0;
-    psp_settings_suffix(backup, ".bak");
-    psp_settings_suffix(temporary, ".tmp");
-    if (!psp_settings_read(sSettingsPath)) {
+    if (!psp_settings_suffix(backup, ".bak") || !psp_settings_suffix(temporary, ".tmp")) {
+        sSettingsPathValid = 0;
+    } else if (!psp_settings_read(sSettingsPath)) {
         if (psp_settings_read(backup)) sRecoveredBackup = 1;
         else psp_settings_read(temporary);
     }

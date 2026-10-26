@@ -237,6 +237,8 @@ PSP_GAME_C_FILES := \
     src/psp/frame_scheduler.c \
     $(PSP_N64PSP_C_FILES) \
     src/psp/platform.c \
+    src/psp/eeprom_store.c \
+    src/psp/timer_core.c \
     src/psp/profiler.c \
     src/psp/ultra_reimpl.c \
     $(PSP_AUDIO_C_FILES) \

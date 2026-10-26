@@ -1,6 +1,7 @@
 
 
 #include "sys.h"
+#include "src/psp/eeprom_store.h"
 
 SaveFile gSaveIOBuffer;
 SaveFile sPrevSaveData;
@@ -27,7 +28,6 @@ s32 Save_WriteBlock(s32 arg0, u8* arg1) {
 }
 
 s32 Save_WriteEeprom(SaveFile* arg0) {
-    s32 var_a2;
     s32 i;
     s32 j;
 
@@ -36,18 +36,19 @@ s32 Save_WriteEeprom(SaveFile* arg0) {
         return -1;
     }
 
+    if (!PspEeprom_BeginTransaction()) return -1;
     for (i = 0; i < EEPROM_MAXBLOCKS; i++) {
-        var_a2 = 0;
+        s32 changed = 0;
         for (j = 0; j < EEPROM_BLOCK_SIZE; j++) {
-            if (((char*) &sPrevSaveData)[EEPROM_BLOCK_SIZE * i + j] != ((char*) arg0)[EEPROM_BLOCK_SIZE * i + j]) {
-                ((char*) &sPrevSaveData)[EEPROM_BLOCK_SIZE * i + j] = ((char*) arg0)[EEPROM_BLOCK_SIZE * i + j];
-                var_a2 = 1;
-            }
+            if (((char*) &sPrevSaveData)[EEPROM_BLOCK_SIZE * i + j] != ((char*) arg0)[EEPROM_BLOCK_SIZE * i + j]) changed = 1;
         }
-        if ((var_a2 == 1) && Save_WriteBlock(i, &((char*) arg0)[EEPROM_BLOCK_SIZE * i])) {
+        if (changed && osEepromWrite(&gSerialEventQueue, i, &((u8*) arg0)[EEPROM_BLOCK_SIZE * i])) {
+            PspEeprom_AbortTransaction();
             return -1;
         }
     }
+    if (!PspEeprom_CommitTransaction()) return -1;
+    sPrevSaveData = *arg0;
     return 0;
 }
 

@@ -1,4 +1,6 @@
 #include "sys.h"
+#include "src/psp/time_conversion.h"
+int sceKernelDelayThread(unsigned int delay);
 
 TimerTask sTimerTasks[16];
 
@@ -19,11 +21,15 @@ s32 Timer_CreateTask(u64 time, TimerAction action, s32* address, s32 value) {
     if (task == NULL) {
         return -1;
     }
-    task->active = true;
     task->action = action;
     task->address = address;
     task->value = value;
-    return osSetTimer(&task->timer, time, 0, &gTimerTaskMesgQueue, task);
+    task->active = true;
+    if (osSetTimer(&task->timer, time, 0, &gTimerTaskMesgQueue, task) != 0) {
+        task->active = false;
+        return -1;
+    }
+    return 0;
 }
 
 void Timer_Increment(s32* address, s32 value) {
@@ -42,9 +48,11 @@ void Timer_CompleteTask(TimerTask* task) {
 }
 
 void Timer_Wait(u64 time) {
-    OSTimer timer;
-    OSMesg dummy;
-
-    osSetTimer(&timer, time, 0, &gTimerWaitMesgQueue, NULL);
-    MQ_WAIT_FOR_MESG(&gTimerWaitMesgQueue, &dummy);
+    u64 usecs = PspTime_N64TicksToUsecs(time);
+    if (time && usecs == 0) usecs = 1;
+    while (usecs != 0) {
+        unsigned int chunk = usecs > 0xFFFFFFFFULL ? 0xFFFFFFFFU : (unsigned int) usecs;
+        if (sceKernelDelayThread(chunk) < 0) return;
+        usecs -= chunk;
+    }
 }

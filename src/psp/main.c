@@ -13,6 +13,7 @@
 #include "src/psp/hw_counter_profile.h"
 #include "src/psp/n64psp_integration.h"
 #include "src/psp/platform.h"
+#include "src/psp/eeprom_store.h"
 #include "src/psp/profiler.h"
 
 void bootproc(void);
@@ -76,6 +77,7 @@ int main(int argc, char* argv[]) {
 
 #ifdef PSP_FULL
     buildBackend = PspGfxBackend_GetBuildDefault();
+    PspEeprom_SetExecutablePath(argc > 0 ? argv[0] : NULL);
     PspSettings_Init(argc > 0 ? argv[0] : NULL, buildBackend);
     if (!PspGfxBackend_Select(PspSettings_GetGraphicsBackend())) {
         PspGfxBackend_Select(buildBackend);

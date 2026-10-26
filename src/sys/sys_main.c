@@ -1,6 +1,7 @@
 #include "sys.h"
 #include "sf64audio_external.h"
 #include "mods.h"
+#include "src/sys/task_pending.h"
 #ifdef TARGET_PSP
 #include "global.h"
 #include "src/psp/frame_interpolation.h"
@@ -33,12 +34,14 @@ s32 sGammaMode = 1;
 SPTask* gCurrentTask;
 SPTask* sAudioTasks[1];
 SPTask* sGfxTasks[2];
-#ifdef AVOID_UB
-SPTask* sNewAudioTasks[2];
-#else
-SPTask* sNewAudioTasks[1];
-#endif
-SPTask* sNewGfxTasks[2];
+static MainTaskPendingQueue sPendingTasks;
+u32 gTaskQueueMaxDrainBatch;
+u32 gTaskPendingAudioMax;
+u32 gTaskPendingGfxMax;
+u32 gTaskCapacityPressure;
+u32 gTaskInvalidMessages;
+u32 gTaskUnsupportedTypes;
+u32 gTaskCompletionFailures;
 u32 gSegments[16];          // 800E1FD0
 OSMesgQueue gPiMgrCmdQueue; // 800E2010
 OSMesg sPiMgrCmdBuff[50];   // 800E2028
@@ -130,12 +133,14 @@ void Main_Initialize(void) {
     for (i = 0; i < ARRAY_COUNT(sGfxTasks); i += 1) {
         sGfxTasks[i] = NULL;
     }
-    for (i = 0; i < ARRAY_COUNT(sNewAudioTasks); i += 1) {
-        sNewAudioTasks[i] = NULL;
-    }
-    for (i = 0; i < ARRAY_COUNT(sNewGfxTasks); i += 1) {
-        sNewGfxTasks[i] = NULL;
-    }
+    MainTaskPending_Init(&sPendingTasks);
+    gTaskQueueMaxDrainBatch = 0;
+    gTaskPendingAudioMax = 0;
+    gTaskPendingGfxMax = 0;
+    gTaskCapacityPressure = 0;
+    gTaskInvalidMessages = 0;
+    gTaskUnsupportedTypes = 0;
+    gTaskCompletionFailures = 0;
 }
 
 void Audio_ThreadEntry(void* arg0) {
@@ -170,7 +175,7 @@ void Audio_ThreadEntry(void* arg0) {
         task->mesgQueue = &gAudioTaskMesgQueue;
         task->msg = (OSMesg) TASK_MESG_1;
         osWritebackDCacheAll();
-        osSendMesg(&gTaskMesgQueue, task, OS_MESG_NOBLOCK);
+        osSendMesg(&gTaskMesgQueue, task, OS_MESG_BLOCK);
 #endif
     }
 
@@ -200,7 +205,7 @@ void Audio_ThreadEntry(void* arg0) {
         MQ_GET_MESG(&gAudioTaskMesgQueue, NULL);
 
         if (task != NULL) {
-            osSendMesg(&gTaskMesgQueue, task, OS_MESG_NOBLOCK);
+            osSendMesg(&gTaskMesgQueue, task, OS_MESG_BLOCK);
         }
         MQ_WAIT_FOR_MESG(&gAudioVImesgQueue, NULL);
 #endif
@@ -231,7 +236,7 @@ static void Graphics_PrepareTask(void) {
 
 static s32 Graphics_SubmitTask(SPTask* task) {
 #if defined(TARGET_PSP) && PSP_GFX_BACKEND_GU
-    s32 result = osSendMesg(&gTaskMesgQueue, task, OS_MESG_NOBLOCK);
+    s32 result = osSendMesg(&gTaskMesgQueue, task, OS_MESG_BLOCK);
 
     if (result == 0) {
         // Wake the renderer without waiting for another VI
@@ -239,7 +244,7 @@ static s32 Graphics_SubmitTask(SPTask* task) {
     }
     return result;
 #else
-    return osSendMesg(&gTaskMesgQueue, task, OS_MESG_NOBLOCK);
+    return osSendMesg(&gTaskMesgQueue, task, OS_MESG_BLOCK);
 #endif
 }
 
@@ -719,61 +724,80 @@ void Main_HandleRSP(void) {
     }
 }
 
+static u8 Main_CountActiveTasks(SPTask** tasks, u8 capacity) {
+    u8 i, count = 0;
+    for (i = 0; i < capacity; i++) if (tasks[i] != NULL) count++;
+    return count;
+}
+
+static void Main_RecordPendingTaskMax(void) {
+    unsigned char i, audio = 0, gfx = 0;
+    for (i = 0; i < sPendingTasks.count; i++) {
+        unsigned char index = (sPendingTasks.first + i) % MAIN_TASK_PENDING_CAPACITY;
+        if (sPendingTasks.entries[index].type == MAIN_TASK_PENDING_AUDIO) audio++;
+        else if (sPendingTasks.entries[index].type == MAIN_TASK_PENDING_GFX) gfx++;
+    }
+    if (audio > gTaskPendingAudioMax) gTaskPendingAudioMax = audio;
+    if (gfx > gTaskPendingGfxMax) gTaskPendingGfxMax = gfx;
+}
+
+static void Main_AdmitPendingTasks(void) {
+    MainTaskPendingEntry entry;
+    for (;;) {
+        u8 audioCount, gfxCount;
+        if (!MainTaskPending_Peek(&sPendingTasks, &entry)) return;
+        if (entry.type == MAIN_TASK_PENDING_UNSUPPORTED) {
+            SPTask* task = (SPTask*) entry.task;
+            task->state = SPTASK_STATE_FINISHED;
+            if (task->mesgQueue != NULL && osSendMesg(task->mesgQueue, task->msg, OS_MESG_NOBLOCK) != 0) {
+                gTaskCompletionFailures++;
+                return;
+            }
+            MainTaskPending_Pop(&sPendingTasks, &entry);
+            continue;
+        }
+        audioCount = Main_CountActiveTasks(sAudioTasks, ARRAY_COUNT(sAudioTasks));
+        gfxCount = Main_CountActiveTasks(sGfxTasks, ARRAY_COUNT(sGfxTasks));
+        if (!MainTaskPending_CanAdmit(entry.type, audioCount, ARRAY_COUNT(sAudioTasks),
+                                      gfxCount, ARRAY_COUNT(sGfxTasks))) return;
+        if (entry.type == MAIN_TASK_PENDING_AUDIO) {
+            sAudioTasks[audioCount] = (SPTask*) entry.task;
+        } else {
+            sGfxTasks[gfxCount] = (SPTask*) entry.task;
+        }
+        MainTaskPending_Pop(&sPendingTasks, &entry);
+    }
+}
+
 void Main_GetNewTasks(void) {
-    u8 i;
-    SPTask** audioTask;
-    SPTask** gfxTask;
-    SPTask** newAudioTask;
-    SPTask** newGfxTask;
-    OSMesg spTaskMsg;
-    SPTask* newTask;
+    OSMesg taskMessage;
+    SPTask* task;
+    unsigned char type;
+    u32 drained = 0;
 
-    newAudioTask = sNewAudioTasks;
-    newGfxTask = sNewGfxTasks;
-    for (i = 0; i < ARRAY_COUNT(sNewAudioTasks); i += 1) {
-        *(newAudioTask++) = NULL;
-    }
-    for (i = 0; i < ARRAY_COUNT(sNewGfxTasks); i += 1) {
-        *(newGfxTask++) = NULL;
-    }
-
-    newAudioTask = sNewAudioTasks;
-    newGfxTask = sNewGfxTasks;
-    while (MQ_GET_MESG(&gTaskMesgQueue, &spTaskMsg)) {
-        newTask = (SPTask*) spTaskMsg;
-        newTask->state = SPTASK_STATE_NOT_STARTED;
-
-        switch (newTask->task.t.type) {
-            case M_AUDTASK:
-                *(newAudioTask++) = newTask;
-                break;
-            case M_GFXTASK:
-                *(newGfxTask++) = newTask;
-                break;
+    Main_AdmitPendingTasks();
+    while (sPendingTasks.count < MAIN_TASK_PENDING_CAPACITY) {
+        if (!MQ_GET_MESG(&gTaskMesgQueue, &taskMessage)) break;
+        drained++;
+        if (drained > gTaskQueueMaxDrainBatch) gTaskQueueMaxDrainBatch = drained;
+        task = (SPTask*) taskMessage;
+        if (task == NULL) {
+            gTaskInvalidMessages++;
+            continue;
         }
-    }
-    newAudioTask = sNewAudioTasks;
-    newGfxTask = sNewGfxTasks;
-    audioTask = sAudioTasks;
-    gfxTask = sGfxTasks;
-
-    for (i = 0; i < ARRAY_COUNT(sAudioTasks); i += 1, audioTask++) {
-        if (*audioTask == NULL) {
-            break;
+        if (task->task.t.type == M_AUDTASK) type = MAIN_TASK_PENDING_AUDIO;
+        else if (task->task.t.type == M_GFXTASK) type = MAIN_TASK_PENDING_GFX;
+        else {
+            type = MAIN_TASK_PENDING_UNSUPPORTED;
+            gTaskUnsupportedTypes++;
+            task->state = SPTASK_STATE_FINISHED;
         }
+        if (type != MAIN_TASK_PENDING_UNSUPPORTED) task->state = SPTASK_STATE_NOT_STARTED;
+        MainTaskPending_Push(&sPendingTasks, task, type);
+        Main_RecordPendingTaskMax();
+        Main_AdmitPendingTasks();
     }
-    for (i; i < ARRAY_COUNT(sAudioTasks); i += 1) {
-        *(audioTask++) = *(newAudioTask++);
-    }
-
-    for (i = 0; i < ARRAY_COUNT(sGfxTasks); i += 1, gfxTask++) {
-        if (*gfxTask == NULL) {
-            break;
-        }
-    }
-    for (i; i < ARRAY_COUNT(sGfxTasks); i += 1) {
-        *(gfxTask++) = *(newGfxTask++);
-    }
+    if (sPendingTasks.count >= MAIN_TASK_PENDING_CAPACITY) gTaskCapacityPressure++;
 }
 
 void Main_StartNextTask(void) {
@@ -845,9 +869,11 @@ void Main_ThreadEntry(void* arg0) {
                 break;
             case EVENT_MESG_SP:
                 Main_HandleRSP();
+                Main_GetNewTasks();
                 break;
             case EVENT_MESG_DP:
                 Main_HandleRDP();
+                Main_GetNewTasks();
                 break;
             case EVENT_MESG_PRENMI:
                 gStartNMI = 1;
