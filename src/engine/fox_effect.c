@@ -445,7 +445,7 @@ void Effect_SmallRock_Draw(EffectSmallRock* this) {
             break;
 
         case LEVEL_AQUAS:
-#if defined(TARGET_PSP) && PSP_FAST_AQUAS
+#if defined(TARGET_PSP)
             if (PspAquasParticles_TryEmit(this->scale2, this->index, (s32) this->scale1)) break;
 #endif
             RCP_SetupDL(&gMasterDisp, SETUPDL_67);

@@ -1076,3 +1076,9 @@ Do not expand Fast mode to other effects without their own evidence.
 After acceptance, remove Aquas overlay counters, per-task particle statistics,
 capture exports and the diagnostic skip switch. Keep the accepted binary for
 comparison and recheck the clean candidate in the same view on hardware.
+
+Aquas native batching is now standard GU rendering in Accurate and Fast. Hardware
+acceptance found no visual compromise, so it should not depend on quality. The
+`PSP_FAST_AQUAS` build flag is removed; PSPGL and failure paths retain the original
+renderer. The historical 5.7 ms result measures the representation change, not
+a current Accurate/Fast difference.

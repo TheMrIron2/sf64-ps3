@@ -3,10 +3,10 @@
 #include "src/psp/renderer.h"
 
 int PspAquasParticles_TryEmit(float scale, int index, int alpha) {
-#if PSP_FAST_AQUAS && PSP_GFX_BACKEND_GU
+#if PSP_GFX_BACKEND_GU
     Gfx* start;
     Gfx matrix;
-    if (!PspSettings_UseFastGraphics()) return 0;
+    if (!PspAquasParticles_Available()) return 0;
     start = gMasterDisp - 1;
     PSP_RENDERER_DL_MTXF(&matrix, NULL, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW);
     if (start->words.w0 != matrix.words.w0) return 0;

@@ -48,7 +48,7 @@ PSP_RENDERER_C_FILES += \
     src/psp/gfx/gfx_pspgl_device.c
 endif
 
-ifeq ($(PSP_FAST_AQUAS)$(PSP_GFX_HAS_GU),11)
+ifneq ($(PSP_GFX_HAS_GU),0)
 PSP_RENDERER_C_FILES += src/psp/gfx/gfx_psp_aquas_particles.c
 endif
 

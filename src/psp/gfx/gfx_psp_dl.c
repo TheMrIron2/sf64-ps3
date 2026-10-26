@@ -6098,7 +6098,7 @@ static void psp_gfx_dl_set_hud_anchor(const Gfx* param) {
 
 static int psp_gfx_dl_run_internal(PspGfxDlContext* ctx, const Gfx* dl, u32 depth);
 
-#if PSP_FAST_AQUAS && PSP_GFX_BACKEND_GU
+#if PSP_GFX_BACKEND_GU
 #include "gfx_psp_aquas_particles.inc.c"
 #endif
 
@@ -6194,7 +6194,7 @@ static int psp_gfx_dl_run_internal(PspGfxDlContext* ctx, const Gfx* dl, u32 dept
         }
 
         if ((opcode == G_NOOP) && PSP_RENDERER_DL_MARKER_MATCH(cmd->words.w1)) {
-#if PSP_FAST_AQUAS && PSP_GFX_BACKEND_GU
+#if PSP_GFX_BACKEND_GU
             if (cmd->words.w1 == PSP_AQUAS_PARTICLE_MARKER) {
                 pc = psp_gfx_dl_aquas_particles(ctx, cmd, depth);
                 continue;

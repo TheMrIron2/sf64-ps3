@@ -10,6 +10,8 @@ static u32 sAtlas[128 * 32] __attribute__((aligned(16)));
 static int sAtlasReady;
 static const u32 sTint[4] = { 0xffffff, 0x0000ff, 0xff0000, 0xffff00 };
 
+int PspAquasParticles_Available(void) { return PspGfxBackend_IsGu(); }
+
 int PspAquasParticles_ValidMatrix(u32 address) {
     unsigned pool;
     for (pool = 0; pool < 2; pool++) {
