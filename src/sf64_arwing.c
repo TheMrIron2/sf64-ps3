@@ -70,6 +70,20 @@ static const u16 s_title_star_colors[16] = {
     0x294bU, 0x18dfU, 0x294bU, 0x1085U,
     0x39ffU, 0x108bU, 0x18cdU, 0x108bU
 };
+static Sf64ArwingTitlePose s_title_arwing_pose = {
+    { -80.0f, 220.0f, -360.0f },
+    4.0f,
+    { 35.0f, -90.0f, -15.0f }
+};
+static int s_title_pose_from_original_logic;
+
+void sf64_arwing_set_title_pose(const Sf64ArwingTitlePose *pose)
+{
+    if (pose) {
+        s_title_arwing_pose = *pose;
+        s_title_pose_from_original_logic = 1;
+    }
+}
 
 static u16 read_be16(const u8 *bytes)
 {
@@ -622,23 +636,27 @@ static int skeleton_read(const u8 *segment,
 }
 
 static void build_title_world_matrix(Sf64ArwingMatrix matrix,
-                                     Sf64ArwingMatrix view_matrix)
+                                     Sf64ArwingMatrix view_matrix,
+                                     const Sf64ArwingTitlePose *pose)
 {
     const float degrees_to_radians = SF64_ARWING_TWO_PI / 360.0f;
 
     memcpy(matrix, view_matrix, sizeof(Sf64ArwingMatrix));
-    matrix_translate(matrix, -80.0f, 220.0f, -360.0f);
-    matrix_scale(matrix, 4.0f, 4.0f, 4.0f);
-    matrix_rotate_z(matrix, -15.0f * degrees_to_radians);
-    matrix_rotate_x(matrix, 35.0f * degrees_to_radians);
-    matrix_rotate_y(matrix, -90.0f * degrees_to_radians);
+    matrix_translate(matrix,
+                     pose->position[0],
+                     pose->position[1],
+                     pose->position[2]);
+    matrix_scale(matrix, pose->scale, pose->scale, pose->scale);
+    matrix_rotate_z(matrix, pose->rotation_degrees[2] * degrees_to_radians);
+    matrix_rotate_x(matrix, pose->rotation_degrees[0] * degrees_to_radians);
+    matrix_rotate_y(matrix, pose->rotation_degrees[1] * degrees_to_radians);
 }
 
 static void write_light_data(u8 *rdram)
 {
     const float degrees_to_radians = SF64_ARWING_TWO_PI / 360.0f;
     const float eye_x = 0.0f;
-    const float eye_y = 0.0f;
+    const float eye_y = 180.0f;
     const float eye_z = 430.0f;
     const float at_x = 0.0f;
     const float at_y = 180.0f;
@@ -675,12 +693,16 @@ static void write_light_data(u8 *rdram)
     ambient[2] = 11U;
 }
 
-int sf64_arwing_build_title_task(const u8 *segment,
-                                 u32 segment_size,
-                                 u8 *rdram,
-                                 u32 rdram_size,
-                                 N64ps3GfxTask *task,
-                                 Sf64ArwingBuildInfo *info)
+static int sf64_arwing_build_title_task_internal(
+    const u8 *segment,
+    u32 segment_size,
+    const u8 *starfield_display_list,
+    u32 starfield_display_list_size,
+    u32 title_star_count,
+    u8 *rdram,
+    u32 rdram_size,
+    N64ps3GfxTask *task,
+    Sf64ArwingBuildInfo *info)
 {
     u32 skeleton[SF64_ARWING_MAX_LIMBS];
     float joint_angles[SF64_ARWING_MAX_LIMBS + 1U][3];
@@ -700,9 +722,20 @@ int sf64_arwing_build_title_task(const u8 *segment,
         rdram_size < SF64_ARWING_RDRAM_REQUIRED_SIZE) {
         return -1;
     }
+    if (starfield_display_list &&
+        (starfield_display_list_size < SF64_ARWING_GFX_COMMAND_BYTES ||
+         (starfield_display_list_size % SF64_ARWING_GFX_COMMAND_BYTES) != 0U ||
+         starfield_display_list_size > SF64_TITLE_STARFIELD_RDRAM_SIZE ||
+         title_star_count > SF64_TITLE_STAR_COUNT)) {
+        return -1;
+    }
     memset(rdram, 0, rdram_size);
     memcpy(rdram + SF64_ARWING_SEGMENT_RDRAM_OFFSET,
            segment, SF64_ARWING_SEGMENT_SIZE);
+    if (starfield_display_list) {
+        memcpy(rdram + SF64_TITLE_STARFIELD_RDRAM_OFFSET,
+               starfield_display_list, starfield_display_list_size);
+    }
 
     if (skeleton_read(segment, segment_size, skeleton, &skeleton_limb_count) != 0 ||
         animation_read(segment, segment_size, &animation_limb_count, joint_angles) != 0 ||
@@ -716,7 +749,7 @@ int sf64_arwing_build_title_task(const u8 *segment,
     }
 
     matrix_look_at(view_matrix,
-                   0.0f, 0.0f, 430.0f,
+                   0.0f, 180.0f, 430.0f,
                    0.0f, 180.0f, 0.0f,
                    0.0f, 1.0f, 0.0f);
     matrix_perspective(projection_matrix);
@@ -738,11 +771,21 @@ int sf64_arwing_build_title_task(const u8 *segment,
     matrix_rotate_z(root_matrix, joint_angles[root_joint_index][2]);
     matrix_rotate_y(root_matrix, joint_angles[root_joint_index][1]);
     matrix_rotate_x(root_matrix, joint_angles[root_joint_index][0]);
-    build_title_world_matrix(world_matrix, view_matrix);
+    if (!s_title_pose_from_original_logic) {
+        s_title_arwing_pose.rotation_degrees[0] += 0.6f;
+    }
+    build_title_world_matrix(world_matrix, view_matrix,
+                             &s_title_arwing_pose);
 
     list_append(&builder, SF64_ARWING_G_MOVEWORD_SEGMENT,
                 SF64_ARWING_SEGMENT_ADDRESS);
-    append_title_starfield(&builder);
+    if (starfield_display_list) {
+        list_append(&builder, 0xbc001006U, 0x8002a000U);
+        list_append(&builder, SF64_ARWING_G_DL, 0x04000000U);
+        builder.title_star_count = title_star_count;
+    } else {
+        append_title_starfield(&builder);
+    }
     list_append(&builder, SF64_ARWING_G_MTX_PROJECTION_LOAD,
                 SF64_ARWING_PROJECTION_ADDRESS);
     list_append(&builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
@@ -786,7 +829,9 @@ int sf64_arwing_build_title_task(const u8 *segment,
     task->dram_size_bytes = rdram_size;
     task->display_list = rdram + SF64_ARWING_ROOT_LIST_OFFSET;
     task->display_list_size_bytes = command_bytes;
-    task->debug_name = "SF64 US Rev 1 title starfield and Arwing";
+    task->debug_name = starfield_display_list
+                           ? "SF64 original title starfield and Arwing"
+                           : "SF64 title starfield and Arwing probe";
 
     if (info) {
         info->animation_frame = 0U;
@@ -796,4 +841,37 @@ int sf64_arwing_build_title_task(const u8 *segment,
         info->generated_command_count = builder.root_command_count;
     }
     return 0;
+}
+
+int sf64_arwing_build_title_task(const u8 *segment,
+                                 u32 segment_size,
+                                 u8 *rdram,
+                                 u32 rdram_size,
+                                 N64ps3GfxTask *task,
+                                 Sf64ArwingBuildInfo *info)
+{
+    return sf64_arwing_build_title_task_internal(segment, segment_size,
+                                                 NULL, 0U, 0U,
+                                                 rdram, rdram_size,
+                                                 task, info);
+}
+
+int sf64_arwing_build_title_task_with_starfield(
+    const u8 *segment,
+    u32 segment_size,
+    const u8 *starfield_display_list,
+    u32 starfield_display_list_size,
+    u32 title_star_count,
+    u8 *rdram,
+    u32 rdram_size,
+    N64ps3GfxTask *task,
+    Sf64ArwingBuildInfo *info)
+{
+    if (!starfield_display_list) {
+        return -1;
+    }
+    return sf64_arwing_build_title_task_internal(
+        segment, segment_size, starfield_display_list,
+        starfield_display_list_size, title_star_count,
+        rdram, rdram_size, task, info);
 }

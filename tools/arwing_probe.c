@@ -2,6 +2,7 @@
 #include "n64ps3/gfx_f3dex1.h"
 #include "n64ps3/pi.h"
 #include "sf64_ps3/arwing.h"
+#include "sf64_ps3/title_starfield.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -16,6 +17,7 @@
 #define SF64_AST_ARWING_SKELETON_OFFSET 0x00016610U
 #define SF64_AST_ARWING_SEGMENT_BYTES \
     (SF64_AST_ARWING_ROM_END - SF64_AST_ARWING_ROM_START)
+#define SF64_ARWING_PROBE_MAX_TEXTURED_TRIANGLES 512U
 
 static const u8 s_expected_body_header[] = {
     0xfd, 0x10, 0x00, 0x00, 0x03, 0x00, 0xac, 0x48
@@ -27,6 +29,8 @@ static const u8 s_expected_skeleton_root[] = {
 
 static u8 s_arwing_segment[SF64_AST_ARWING_SEGMENT_BYTES];
 static u8 s_rdram[SF64_ARWING_RDRAM_REQUIRED_SIZE];
+static u8 s_title_starfield[SF64_TITLE_STARFIELD_RDRAM_SIZE];
+static u8 s_next_title_starfield[SF64_TITLE_STARFIELD_RDRAM_SIZE];
 
 static u32 read_be32(const u8 *bytes)
 {
@@ -69,9 +73,25 @@ typedef struct Sf64ArwingProbe {
     u32 vertices_in_clip;
     u32 textured_triangles;
     u32 unique_textures;
+    u32 texture_state_hash;
+    u32 texture_shade_hash;
+    u8 texture_shade[SF64_ARWING_PROBE_MAX_TEXTURED_TRIANGLES][3][4];
+    u32 nonzero_tile_origins;
+    u32 nonzero_tile_shifts;
+    float first_textured_clip[4];
+    s16 first_textured_st[6];
     const u8 *texture_sources[64];
     u16 texture_widths[64];
     u16 texture_heights[64];
+    u16 first_texture_uls;
+    u16 first_texture_ult;
+    u8 first_texture_mask_s;
+    u8 first_texture_mask_t;
+    u8 first_texture_shift_s;
+    u8 first_texture_shift_t;
+    u8 first_texture_wrap_s;
+    u8 first_texture_wrap_t;
+    u32 texture_hashes[64];
     float minimum[3];
     float maximum[3];
 } Sf64ArwingProbe;
@@ -88,6 +108,85 @@ static int record_triangle(void *user_data,
     probe->triangles++;
     if (a->texture_enabled && a->texture_rgba16) {
         u32 texture_index;
+        u32 vertex_index;
+
+        if (probe->textured_triangles == 0U) {
+            probe->texture_state_hash = 2166136261U;
+            probe->texture_shade_hash = 2166136261U;
+        }
+        for (vertex_index = 0; vertex_index < 3U; vertex_index++) {
+            const N64ps3GfxF3dex1Vertex *vertex = vertices[vertex_index];
+            const u16 values[] = {
+                (u16)vertex->s, (u16)vertex->t,
+                vertex->texture_scale_s, vertex->texture_scale_t,
+                vertex->texture_uls, vertex->texture_ult,
+                vertex->texture_width, vertex->texture_height
+            };
+            u32 value_index;
+
+            for (value_index = 0;
+                 value_index < sizeof(values) / sizeof(values[0]);
+                 value_index++) {
+                probe->texture_state_hash =
+                    (probe->texture_state_hash ^ (u8)values[value_index]) *
+                    16777619U;
+                probe->texture_state_hash =
+                    (probe->texture_state_hash ^ (u8)(values[value_index] >> 8)) *
+                    16777619U;
+            }
+            probe->texture_state_hash =
+                (probe->texture_state_hash ^ vertex->texture_mask_s) * 16777619U;
+            probe->texture_state_hash =
+                (probe->texture_state_hash ^ vertex->texture_mask_t) * 16777619U;
+            probe->texture_state_hash =
+                (probe->texture_state_hash ^ vertex->texture_shift_s) * 16777619U;
+            probe->texture_state_hash =
+                (probe->texture_state_hash ^ vertex->texture_shift_t) * 16777619U;
+            probe->texture_state_hash =
+                (probe->texture_state_hash ^ vertex->texture_wrap_s) * 16777619U;
+            probe->texture_state_hash =
+                (probe->texture_state_hash ^ vertex->texture_wrap_t) * 16777619U;
+            probe->texture_shade_hash =
+                (probe->texture_shade_hash ^ vertex->color[0]) * 16777619U;
+            probe->texture_shade_hash =
+                (probe->texture_shade_hash ^ vertex->color[1]) * 16777619U;
+            probe->texture_shade_hash =
+                (probe->texture_shade_hash ^ vertex->color[2]) * 16777619U;
+            probe->texture_shade_hash =
+                (probe->texture_shade_hash ^ vertex->color[3]) * 16777619U;
+            if (probe->textured_triangles <
+                SF64_ARWING_PROBE_MAX_TEXTURED_TRIANGLES) {
+                memcpy(probe->texture_shade[probe->textured_triangles]
+                                               [vertex_index],
+                       vertex->color, 4U);
+            }
+        }
+        if (a->texture_uls != 0U || a->texture_ult != 0U) {
+            probe->nonzero_tile_origins++;
+        }
+        if (a->texture_shift_s != 0U || a->texture_shift_t != 0U) {
+            probe->nonzero_tile_shifts++;
+        }
+        if (probe->textured_triangles == 0U) {
+            probe->first_textured_clip[0] = a->clip_x;
+            probe->first_textured_clip[1] = a->clip_y;
+            probe->first_textured_clip[2] = a->clip_z;
+            probe->first_textured_clip[3] = a->clip_w;
+            probe->first_textured_st[0] = a->s;
+            probe->first_textured_st[1] = a->t;
+            probe->first_textured_st[2] = b->s;
+            probe->first_textured_st[3] = b->t;
+            probe->first_textured_st[4] = c->s;
+            probe->first_textured_st[5] = c->t;
+            probe->first_texture_uls = a->texture_uls;
+            probe->first_texture_ult = a->texture_ult;
+            probe->first_texture_mask_s = a->texture_mask_s;
+            probe->first_texture_mask_t = a->texture_mask_t;
+            probe->first_texture_shift_s = a->texture_shift_s;
+            probe->first_texture_shift_t = a->texture_shift_t;
+            probe->first_texture_wrap_s = a->texture_wrap_s;
+            probe->first_texture_wrap_t = a->texture_wrap_t;
+        }
         probe->textured_triangles++;
         for (texture_index = 0; texture_index < probe->unique_textures;
              texture_index++) {
@@ -99,9 +198,18 @@ static int record_triangle(void *user_data,
         }
         if (texture_index == probe->unique_textures &&
             probe->unique_textures < 64U) {
+            const u8 *bytes = a->texture_rgba16;
+            u32 byte_count = (u32)a->texture_width * a->texture_height * 2U;
+            u32 hash = 2166136261U;
+            u32 byte_index;
+
+            for (byte_index = 0; byte_index < byte_count; byte_index++) {
+                hash = (hash ^ bytes[byte_index]) * 16777619U;
+            }
             probe->texture_sources[texture_index] = a->texture_rgba16;
             probe->texture_widths[texture_index] = a->texture_width;
             probe->texture_heights[texture_index] = a->texture_height;
+            probe->texture_hashes[texture_index] = hash;
             probe->unique_textures++;
         }
     }
@@ -262,10 +370,19 @@ static int load_extracted_segment(const char *path)
 int main(int argc, char **argv)
 {
     N64ps3GfxTask task;
+    N64ps3GfxTask next_task;
     N64ps3GfxF3dex1Stats stats;
+    N64ps3GfxF3dex1Stats next_stats;
     N64ps3GfxF3dex1Status status;
+    N64ps3GfxF3dex1Status next_status;
     Sf64ArwingBuildInfo build_info;
+    Sf64ArwingBuildInfo next_build_info;
     Sf64ArwingProbe probe;
+    Sf64ArwingProbe next_probe;
+    u32 starfield_command_bytes;
+    u32 title_star_count;
+    u32 next_starfield_command_bytes;
+    u32 next_title_star_count;
     u32 opcode;
     int rom_mounted = 0;
 
@@ -291,18 +408,43 @@ int main(int argc, char **argv)
     }
 
     memset(&probe, 0, sizeof(probe));
-    if (sf64_arwing_build_title_task(s_arwing_segment,
-                                     (u32)sizeof(s_arwing_segment),
-                                     s_rdram,
-                                     (u32)sizeof(s_rdram),
-                                     &task,
-                                     &build_info) != 0) {
+    if (sf64_title_starfield_build(s_title_starfield,
+                                  (u32)sizeof(s_title_starfield),
+                                  &starfield_command_bytes,
+                                  &title_star_count) != 0 ||
+        sf64_arwing_build_title_task_with_starfield(
+            s_arwing_segment,
+            (u32)sizeof(s_arwing_segment),
+            s_title_starfield,
+            starfield_command_bytes,
+            title_star_count,
+            s_rdram,
+            (u32)sizeof(s_rdram),
+            &task,
+            &build_info) != 0) {
         if (rom_mounted) {
             n64ps3_pi_unmount_rom();
         }
         fprintf(stderr, "could not build title-pose Arwing task from the ROM bank\n");
         return 1;
     }
+    if (sf64_title_starfield_build(s_next_title_starfield,
+                                   (u32)sizeof(s_next_title_starfield),
+                                   &next_starfield_command_bytes,
+                                   &next_title_star_count) != 0 ||
+        (starfield_command_bytes == next_starfield_command_bytes &&
+         memcmp(s_title_starfield, s_next_title_starfield,
+                starfield_command_bytes) == 0)) {
+        if (rom_mounted) {
+            n64ps3_pi_unmount_rom();
+        }
+        fprintf(stderr, "original title starfield did not advance between frames\n");
+        return 1;
+    }
+    printf("original title starfield: stars=%u, commands=%u\n",
+           title_star_count, starfield_command_bytes / 8U);
+    printf("next original title frame: stars=%u, commands=%u (scroll advanced)\n",
+           next_title_star_count, next_starfield_command_bytes / 8U);
     printf("title pose: animation frame %u, skeleton limbs=%u, display lists=%u, "
            "stars=%u, root commands=%u\n",
            build_info.animation_frame, build_info.skeleton_limb_count,
@@ -323,6 +465,17 @@ int main(int argc, char **argv)
            stats.textured_triangle_count, stats.fill_color_command_count,
            stats.fill_rectangle_count, stats.unsupported_command_count);
     printf("unique RGBA16 texture sources=%u\n", probe.unique_textures);
+    printf("first textured triangle UV (N64 10.5): (%d,%d),(%d,%d),(%d,%d)\n",
+           probe.first_textured_st[0], probe.first_textured_st[1],
+           probe.first_textured_st[2], probe.first_textured_st[3],
+           probe.first_textured_st[4], probe.first_textured_st[5]);
+    printf("first textured tile: origin=(%u,%u) mask=(%u,%u) shift=(%u,%u) wrap=(%u,%u); "
+           "nonzero origins=%u shifts=%u\n",
+           probe.first_texture_uls, probe.first_texture_ult,
+           probe.first_texture_mask_s, probe.first_texture_mask_t,
+           probe.first_texture_shift_s, probe.first_texture_shift_t,
+           probe.first_texture_wrap_s, probe.first_texture_wrap_t,
+           probe.nonzero_tile_origins, probe.nonzero_tile_shifts);
     for (opcode = 0; opcode < probe.unique_textures; opcode++) {
         printf("  texture %u: %ux%u\n", opcode,
                probe.texture_widths[opcode], probe.texture_heights[opcode]);
@@ -340,14 +493,100 @@ int main(int argc, char **argv)
            probe.minimum[1], probe.maximum[1],
            probe.minimum[2], probe.maximum[2], probe.vertices_in_clip);
 
+    memset(&next_probe, 0, sizeof(next_probe));
+    if (sf64_arwing_build_title_task_with_starfield(
+            s_arwing_segment,
+            (u32)sizeof(s_arwing_segment),
+            s_next_title_starfield,
+            next_starfield_command_bytes,
+            next_title_star_count,
+            s_rdram,
+            (u32)sizeof(s_rdram),
+            &next_task,
+            &next_build_info) != 0) {
+        fprintf(stderr, "could not build the next original title frame\n");
+        return 1;
+    }
+    next_status = n64ps3_gfx_decode_f3dex1(&next_task, record_triangle,
+                                           &next_probe, &next_stats);
+    printf("next F3DEX1 status=%d commands=%u triangles=%u stars=%u "
+           "textured_triangles=%u skipped=%u\n",
+           (int)next_status, next_stats.command_count,
+           next_stats.triangle_count, next_build_info.title_star_count,
+           next_stats.textured_triangle_count,
+           next_stats.unsupported_command_count);
+
+    {
+        u32 texture_index;
+        int same_textures = probe.unique_textures == next_probe.unique_textures;
+        int same_uv = memcmp(probe.first_textured_st,
+                             next_probe.first_textured_st,
+                             sizeof(probe.first_textured_st)) == 0;
+        int same_texture_state = probe.texture_state_hash ==
+                                 next_probe.texture_state_hash;
+        int same_shading = probe.texture_shade_hash ==
+                           next_probe.texture_shade_hash;
+        u32 max_shade_delta = 0U;
+
+        for (texture_index = 0;
+            same_textures && texture_index < probe.unique_textures;
+            texture_index++) {
+            if (probe.texture_widths[texture_index] !=
+                    next_probe.texture_widths[texture_index] ||
+                probe.texture_heights[texture_index] !=
+                    next_probe.texture_heights[texture_index] ||
+                probe.texture_hashes[texture_index] !=
+                    next_probe.texture_hashes[texture_index]) {
+                same_textures = 0;
+            }
+        }
+        for (texture_index = 0;
+             texture_index < probe.textured_triangles &&
+             texture_index < next_probe.textured_triangles &&
+             texture_index < SF64_ARWING_PROBE_MAX_TEXTURED_TRIANGLES;
+             texture_index++) {
+            u32 vertex_index;
+            for (vertex_index = 0; vertex_index < 3U; vertex_index++) {
+                u32 channel;
+                for (channel = 0; channel < 4U; channel++) {
+                    u8 first = probe.texture_shade[texture_index]
+                                                   [vertex_index][channel];
+                    u8 next = next_probe.texture_shade[texture_index]
+                                                       [vertex_index][channel];
+                    u32 delta = first > next ? first - next : next - first;
+                    if (delta > max_shade_delta) {
+                        max_shade_delta = delta;
+                    }
+                }
+            }
+        }
+        printf("two-frame texture-source hashes=%s; first-triangle UVs=%s; "
+               "all texture-coordinate state=%s (%08x/%08x); "
+               "vertex shade=%s (%08x/%08x), max component delta=%u\n",
+               same_textures ? "identical" : "different",
+               same_uv ? "identical" : "different",
+               same_texture_state ? "identical" : "different",
+               probe.texture_state_hash, next_probe.texture_state_hash,
+               same_shading ? "identical" : "different",
+               probe.texture_shade_hash, next_probe.texture_shade_hash,
+               max_shade_delta);
+    }
+
     if (status != N64PS3_GFX_F3DEX1_OK ||
-        build_info.title_star_count == 0U ||
+        build_info.title_star_count != 456U ||
         stats.fill_color_command_count != build_info.title_star_count ||
         stats.fill_rectangle_count != build_info.title_star_count ||
         stats.triangle_count != 174U + 2U * build_info.title_star_count ||
         stats.textured_triangle_count != 174U ||
         stats.unsupported_command_count != 0U ||
-        probe.triangles != stats.triangle_count) {
+        probe.triangles != stats.triangle_count ||
+        next_status != N64PS3_GFX_F3DEX1_OK ||
+        next_build_info.title_star_count != next_title_star_count ||
+        next_stats.fill_rectangle_count != next_title_star_count ||
+        next_stats.textured_triangle_count != 174U ||
+        next_stats.unsupported_command_count != 0U ||
+        memcmp(probe.first_textured_clip, next_probe.first_textured_clip,
+               sizeof(probe.first_textured_clip)) == 0) {
         fprintf(stderr,
                 "n64ps3 did not decode the original starfield and Arwing lists\n");
         return 1;

@@ -1,6 +1,8 @@
 #include "sf64_ps3/platform.h"
 #include "sf64_ps3/port_config.h"
 #include "sf64_ps3/arwing.h"
+#include "sf64_ps3/title_starfield.h"
+#include "sf64_ps3/title_runtime.h"
 
 #include "n64ps3/n64ps3.h"
 #include "n64ps3/gfx_f3dex1.h"
@@ -17,7 +19,11 @@ static int s_vi_registered;
 extern const unsigned char sf64_arwing_segment_data[];
 extern const unsigned int sf64_arwing_segment_size;
 static u8 s_arwing_rdram[SF64_ARWING_RDRAM_REQUIRED_SIZE];
+static u8 s_title_starfield_commands[SF64_TITLE_STARFIELD_RDRAM_SIZE];
+static u32 s_title_starfield_command_bytes;
+static u32 s_title_star_count;
 static int s_arwing_task_logged;
+static int s_original_title_logic_initialized;
 #else
 
 static const u8 s_f3dex1_root_display_list[] = {
@@ -229,19 +235,66 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
 #if defined(SF64_PS3_ARWING_PROBE)
     N64ps3GfxTask task;
     Sf64ArwingBuildInfo info;
+    Sf64OriginalTitleArwingPose original_pose;
+    Sf64ArwingTitlePose arwing_pose;
 
-    if (sf64_arwing_build_title_task(sf64_arwing_segment_data,
-                                     sf64_arwing_segment_size,
-                                     s_arwing_rdram,
-                                     (u32)sizeof(s_arwing_rdram),
-                                     &task,
-                                     &info) != 0) {
-        printf("[sf64-ps3] failed to build original Arwing title-pose task\n");
+    if (!s_original_title_logic_initialized) {
+        if (sf64_title_starfield_init() != 0 ||
+            sf64_original_title_logic_init() != 0) {
+            printf("[sf64-ps3] original title state initialization failed\n");
+            return SF64_API_FAILED;
+        }
+        s_original_title_logic_initialized = 1;
+    }
+    if (sf64_original_title_logic_update() != 0 ||
+        sf64_original_title_logic_get_arwing_pose(&original_pose) != 0) {
+        printf("[sf64-ps3] original Title_Screen_Update failed\n");
+        return SF64_API_FAILED;
+    }
+#if defined(SF64_PS3_STATIC_ARWING_POSE)
+    original_pose.rotation_degrees[0] = 35.0f;
+#endif
+
+    memcpy(arwing_pose.position, original_pose.position,
+           sizeof(arwing_pose.position));
+    arwing_pose.scale = original_pose.scale;
+    memcpy(arwing_pose.rotation_degrees, original_pose.rotation_degrees,
+           sizeof(arwing_pose.rotation_degrees));
+    sf64_arwing_set_title_pose(&arwing_pose);
+
+    if (sf64_title_starfield_build_current(
+            s_title_starfield_commands,
+            (u32)sizeof(s_title_starfield_commands),
+            &s_title_starfield_command_bytes,
+            &s_title_star_count) != 0) {
+        printf("[sf64-ps3] original title starfield update failed\n");
+        return SF64_API_FAILED;
+    }
+    if (sf64_arwing_build_title_task_with_starfield(
+            sf64_arwing_segment_data,
+            sf64_arwing_segment_size,
+            s_title_starfield_commands,
+            s_title_starfield_command_bytes,
+            s_title_star_count,
+            s_arwing_rdram,
+            (u32)sizeof(s_arwing_rdram),
+            &task,
+            &info) != 0) {
+        printf("[sf64-ps3] failed to build original title starfield/Arwing task\n");
         return SF64_API_FAILED;
     }
     if (!s_arwing_task_logged) {
-        printf("[sf64-ps3] Arwing skeleton limbs=%u display-lists=%u "
-               "frame=%u root-commands=%u\n",
+        printf("[sf64-ps3] original Title_Screen_Update pose "
+               "pos=(%.1f,%.1f,%.1f) rot=(%.1f,%.1f,%.1f) scale=%.1f\n",
+               original_pose.position[0], original_pose.position[1],
+               original_pose.position[2], original_pose.rotation_degrees[0],
+               original_pose.rotation_degrees[1], original_pose.rotation_degrees[2],
+               original_pose.scale);
+        printf("[sf64-ps3] title frame starfield stars=%u commands=%u; "
+               "Arwing skeleton limbs=%u display-lists=%u "
+               "wing-frame=%u root-commands=%u\n",
+               s_title_star_count,
+               s_title_starfield_command_bytes / 8U,
                info.skeleton_limb_count, info.display_list_count,
                info.animation_frame, info.generated_command_count);
         s_arwing_task_logged = 1;
