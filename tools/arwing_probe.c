@@ -84,7 +84,6 @@ static int record_triangle(void *user_data,
     Sf64ArwingProbe *probe = (Sf64ArwingProbe *)user_data;
     const N64ps3GfxF3dex1Vertex *vertices[3] = { a, b, c };
     u32 vertex_index;
-    u32 axis;
 
     probe->triangles++;
     if (a->texture_enabled && a->texture_rgba16) {
@@ -107,13 +106,25 @@ static int record_triangle(void *user_data,
         }
     }
     for (vertex_index = 0; vertex_index < 3U; vertex_index++) {
-        const float coordinates[3] = {
-            vertices[vertex_index]->clip_x,
-            vertices[vertex_index]->clip_y,
-            vertices[vertex_index]->clip_z
-        };
-        if (coordinates[0] >= -1.0f && coordinates[0] <= 1.0f &&
-            coordinates[1] >= -1.0f && coordinates[1] <= 1.0f) {
+        float coordinates[3];
+        float inverse_w = 0.0f;
+        u32 axis;
+
+        if (vertices[vertex_index]->clip_valid != 0U &&
+            vertices[vertex_index]->clip_w != 0.0f) {
+            inverse_w = 1.0f / vertices[vertex_index]->clip_w;
+            coordinates[0] = vertices[vertex_index]->clip_x * inverse_w;
+            coordinates[1] = vertices[vertex_index]->clip_y * inverse_w;
+            coordinates[2] = vertices[vertex_index]->clip_z * inverse_w;
+        } else {
+            coordinates[0] = 0.0f;
+            coordinates[1] = 0.0f;
+            coordinates[2] = 0.0f;
+        }
+        if (vertices[vertex_index]->clip_valid != 0U &&
+            coordinates[0] >= -1.0f && coordinates[0] <= 1.0f &&
+            coordinates[1] >= -1.0f && coordinates[1] <= 1.0f &&
+            coordinates[2] >= -1.0f && coordinates[2] <= 1.0f) {
             probe->vertices_in_clip++;
         }
         for (axis = 0; axis < 3U; axis++) {
@@ -132,12 +143,15 @@ static int record_triangle(void *user_data,
     }
     if (probe->triangles <= 3U) {
         printf("triangle %u raw=(%d,%d,%d),(%d,%d,%d),(%d,%d,%d) "
-               "clip=(%.3f,%.3f,%.3f),(%.3f,%.3f,%.3f),(%.3f,%.3f,%.3f)\n",
+               "ndc=(%.3f,%.3f,%.3f),(%.3f,%.3f,%.3f),(%.3f,%.3f,%.3f)\n",
                probe->triangles,
                a->x, a->y, a->z, b->x, b->y, b->z, c->x, c->y, c->z,
-               a->clip_x, a->clip_y, a->clip_z,
-               b->clip_x, b->clip_y, b->clip_z,
-               c->clip_x, c->clip_y, c->clip_z);
+               a->clip_x / a->clip_w, a->clip_y / a->clip_w,
+               a->clip_z / a->clip_w,
+               b->clip_x / b->clip_w, b->clip_y / b->clip_w,
+               b->clip_z / b->clip_w,
+               c->clip_x / c->clip_w, c->clip_y / c->clip_w,
+               c->clip_z / c->clip_w);
     }
     return 0;
 }
@@ -209,6 +223,42 @@ static int validate_uncompressed_us_rev1(void)
     return 0;
 }
 
+static int load_extracted_segment(const char *path)
+{
+    FILE *input = fopen(path, "rb");
+    size_t bytes_read;
+    int trailing_byte;
+
+    if (!input) {
+        fprintf(stderr, "could not open extracted Arwing bank: %s\n", path);
+        return -1;
+    }
+    bytes_read = fread(s_arwing_segment, 1U, sizeof(s_arwing_segment), input);
+    trailing_byte = fgetc(input);
+    if (fclose(input) != 0 || bytes_read != sizeof(s_arwing_segment) ||
+        trailing_byte != EOF) {
+        fprintf(stderr,
+                "extracted Arwing bank must be exactly %u bytes: %s\n",
+                (u32)sizeof(s_arwing_segment), path);
+        return -1;
+    }
+    if (memcmp(s_arwing_segment + SF64_AST_ARWING_BODY_DL_OFFSET,
+               s_expected_body_header, sizeof(s_expected_body_header)) != 0 ||
+        memcmp(s_arwing_segment + SF64_AST_ARWING_SKELETON_OFFSET,
+               s_expected_skeleton_root, sizeof(s_expected_skeleton_root)) != 0) {
+        fprintf(stderr,
+                "extracted bank does not match US Rev 1 Arwing metadata: %s\n",
+                path);
+        return -1;
+    }
+
+    printf("loaded extracted US Rev 1 ast_arwing bank: %u bytes; segment %u\n",
+           (u32)sizeof(s_arwing_segment), SF64_ARWING_SEGMENT_ID);
+    printf("body display list: segment %u:%06x\n",
+           SF64_ARWING_SEGMENT_ID, SF64_AST_ARWING_BODY_DL_OFFSET);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     N64ps3GfxTask task;
@@ -217,19 +267,26 @@ int main(int argc, char **argv)
     Sf64ArwingBuildInfo build_info;
     Sf64ArwingProbe probe;
     u32 opcode;
+    int rom_mounted = 0;
 
-    if (argc != 2) {
+    if (argc == 2) {
+        if (n64ps3_pi_mount_rom(argv[1]) != 0) {
+            return 2;
+        }
+        rom_mounted = 1;
+        if (validate_uncompressed_us_rev1() != 0) {
+            n64ps3_pi_unmount_rom();
+            return 2;
+        }
+    } else if (argc == 3 && strcmp(argv[1], "--segment") == 0) {
+        if (load_extracted_segment(argv[2]) != 0) {
+            return 2;
+        }
+    } else {
         fprintf(stderr,
-                "usage: %s <uncompressed-us-rev1-rom.z64>\n",
-                argv[0]);
-        return 2;
-    }
-    if (n64ps3_pi_mount_rom(argv[1]) != 0) {
-        return 2;
-    }
-
-    if (validate_uncompressed_us_rev1() != 0) {
-        n64ps3_pi_unmount_rom();
+                "usage: %s <uncompressed-us-rev1-rom.z64> | "
+                "%s --segment <extracted-ast_arwing.bin>\n",
+                argv[0], argv[0]);
         return 2;
     }
 
@@ -240,25 +297,31 @@ int main(int argc, char **argv)
                                      (u32)sizeof(s_rdram),
                                      &task,
                                      &build_info) != 0) {
-        n64ps3_pi_unmount_rom();
+        if (rom_mounted) {
+            n64ps3_pi_unmount_rom();
+        }
         fprintf(stderr, "could not build title-pose Arwing task from the ROM bank\n");
         return 1;
     }
     printf("title pose: animation frame %u, skeleton limbs=%u, display lists=%u, "
-           "root commands=%u\n",
+           "stars=%u, root commands=%u\n",
            build_info.animation_frame, build_info.skeleton_limb_count,
-           build_info.display_list_count, build_info.generated_command_count);
+           build_info.display_list_count, build_info.title_star_count,
+           build_info.generated_command_count);
 
     status = n64ps3_gfx_decode_f3dex1(&task, record_triangle, &probe, &stats);
-    n64ps3_pi_unmount_rom();
+    if (rom_mounted) {
+        n64ps3_pi_unmount_rom();
+    }
 
     printf("F3DEX1 status=%d commands=%u vertex_loads=%u triangles=%u "
            "nested_lists=%u matrices=%u textures=%u textured_triangles=%u "
-           "skipped=%u\n",
+           "fill_colors=%u fill_rectangles=%u skipped=%u\n",
            (int)status, stats.command_count, stats.vertex_load_count,
            stats.triangle_count, stats.display_list_call_count,
            stats.matrix_command_count, stats.texture_load_count,
-           stats.textured_triangle_count, stats.unsupported_command_count);
+           stats.textured_triangle_count, stats.fill_color_command_count,
+           stats.fill_rectangle_count, stats.unsupported_command_count);
     printf("unique RGBA16 texture sources=%u\n", probe.unique_textures);
     for (opcode = 0; opcode < probe.unique_textures; opcode++) {
         printf("  texture %u: %ux%u\n", opcode,
@@ -271,15 +334,22 @@ int main(int argc, char **argv)
                    stats.unsupported_opcode_counts[opcode]);
         }
     }
-    printf("clip bounds x=[%.3f,%.3f] y=[%.3f,%.3f] z=[%.3f,%.3f], "
+    printf("NDC bounds x=[%.3f,%.3f] y=[%.3f,%.3f] z=[%.3f,%.3f], "
            "vertices inside viewport=%u\n",
            probe.minimum[0], probe.maximum[0],
            probe.minimum[1], probe.maximum[1],
            probe.minimum[2], probe.maximum[2], probe.vertices_in_clip);
 
     if (status != N64PS3_GFX_F3DEX1_OK ||
-        stats.triangle_count == 0U || probe.triangles != stats.triangle_count) {
-        fprintf(stderr, "n64ps3 did not decode original Arwing body geometry\n");
+        build_info.title_star_count == 0U ||
+        stats.fill_color_command_count != build_info.title_star_count ||
+        stats.fill_rectangle_count != build_info.title_star_count ||
+        stats.triangle_count != 174U + 2U * build_info.title_star_count ||
+        stats.textured_triangle_count != 174U ||
+        stats.unsupported_command_count != 0U ||
+        probe.triangles != stats.triangle_count) {
+        fprintf(stderr,
+                "n64ps3 did not decode the original starfield and Arwing lists\n");
         return 1;
     }
     return 0;

@@ -11,6 +11,7 @@ typedef struct Sf64ArwingBuildInfo {
     u32 animation_frame;
     u32 skeleton_limb_count;
     u32 display_list_count;
+    u32 title_star_count;
     u32 generated_command_count;
 } Sf64ArwingBuildInfo;
 

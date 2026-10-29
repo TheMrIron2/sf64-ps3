@@ -123,11 +123,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("rom", type=Path, help="local US Rev 1 .z64 ROM")
     parser.add_argument("output_c", type=Path, help="generated C file under build/")
+    parser.add_argument(
+        "--binary-output",
+        type=Path,
+        help="also write the extracted segment as a build-only binary",
+    )
     args = parser.parse_args()
 
     try:
         segment = extract_bank(args.rom.read_bytes())
         write_c_resource(segment, args.output_c)
+        if args.binary_output:
+            args.binary_output.parent.mkdir(parents=True, exist_ok=True)
+            args.binary_output.write_bytes(segment)
     except (OSError, ValueError) as error:
         parser.error(str(error))
 
@@ -135,6 +143,8 @@ def main() -> int:
         f"extracted ast_arwing: {len(segment)} bytes from US Rev 1 ROM "
         f"into {args.output_c}"
     )
+    if args.binary_output:
+        print(f"also wrote extracted segment to {args.binary_output}")
     return 0
 
 
