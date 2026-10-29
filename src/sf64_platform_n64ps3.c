@@ -237,13 +237,23 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
     Sf64ArwingBuildInfo info;
     Sf64OriginalTitleArwingPose original_pose;
     Sf64ArwingTitlePose arwing_pose;
+    int title_draw_active;
 
     if (!s_original_title_logic_initialized) {
+        s32 game_state;
+        s32 title_state;
+        s32 cutscene_state;
+        s32 main_controller;
+
         if (sf64_title_starfield_init() != 0 ||
             sf64_original_title_logic_init() != 0) {
             printf("[sf64-ps3] original title state initialization failed\n");
             return SF64_API_FAILED;
         }
+        sf64_original_title_logic_get_state(&game_state, &title_state,
+                                            &cutscene_state, &main_controller);
+        printf("[sf64-ps3] original title boot: game=%d title=%d cutscene=%d pad=%d\n",
+               game_state, title_state, cutscene_state, main_controller);
         s_original_title_logic_initialized = 1;
     }
     if (sf64_original_title_logic_update() != 0 ||
@@ -268,6 +278,15 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
             &s_title_starfield_command_bytes,
             &s_title_star_count) != 0) {
         printf("[sf64-ps3] original title starfield update failed\n");
+        return SF64_API_FAILED;
+    }
+    title_draw_active = sf64_original_title_logic_draw();
+    if (title_draw_active <= 0) {
+        if (title_draw_active == 0) {
+            printf("[sf64-ps3] original title draw gate is inactive\n");
+        } else {
+            printf("[sf64-ps3] original title draw dispatch failed\n");
+        }
         return SF64_API_FAILED;
     }
     if (sf64_arwing_build_title_task_with_starfield(

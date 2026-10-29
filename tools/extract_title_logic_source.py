@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Extract the original title setup/update routines into a build-only TU.
+"""Extract the original title boot/setup/update path into a build-only TU.
 
-The generated file keeps the title's real state initialization and per-frame
-update code, while avoiding the rest of the game's menu and cutscene link graph.
+The generated file keeps the title's real setup and per-frame state machine,
+while avoiding the rest of the game's menu, audio, and cutscene link graph.
 """
 
 from __future__ import annotations
@@ -69,6 +69,9 @@ def main() -> int:
     title_source = (source_root / "src/overlays/ovl_menu/fox_title.c").read_text(
         encoding="utf-8"
     )
+    menu_dispatch_source = (
+        source_root / "src/overlays/ovl_menu/fox_i_menu.c"
+    ).read_text(encoding="utf-8")
     stdlib_source = (source_root / "src/engine/fox_std_lib.c").read_text(
         encoding="utf-8"
     )
@@ -126,6 +129,12 @@ def main() -> int:
         "#define SEGMENTED_TO_VIRTUAL(address) sf64_original_segmented_to_virtual((uintptr_t)(address))",
         "#undef AUDIO_PLAY_BGM",
         "#define AUDIO_PLAY_BGM(sequence) ((void)(sequence))",
+        "#undef AUDIO_SET_SPEC",
+        "#define AUDIO_SET_SPEC(layout, spec) ((void)0)",
+        "#undef AUDIO_PLAY_SFX",
+        "#define AUDIO_PLAY_SFX(id, source, token) ((void)0)",
+        "#undef SEQCMD_STOP_SEQUENCE",
+        "#define SEQCMD_STOP_SEQUENCE(player, duration) ((void)0)",
         "#define PSP_TRACE(message) ((void)0)",
         "extern s32 sRandSeed1;",
         "extern s32 sRandSeed2;",
@@ -151,9 +160,55 @@ def main() -> int:
         extract_function(stdlib_source, "Math_SmoothStepToAngle"),
         extract_function(stdlib_source, "Math_SmoothStepToVec3fArray"),
         extract_function(sys_math_source, "Rand_ZeroOne"),
+        extract_function(title_source, "Title_CheckControllers"),
+        extract_function(title_source, "Title_GetRankTotalHits"),
+        extract_function(title_source, "Title_Setup"),
+        extract_function(title_source, "Title_Main"),
+        extract_function(title_source, "Title_UpdateEntry"),
+        extract_function(title_source, "Title_NextState_Check"),
+        extract_function(title_source, "Title_NextState_TitleScreen"),
+        extract_function(title_source, "Title_NextState_OptionMenu"),
+        extract_function(title_source, "Title_Screen_Input"),
         extract_function(title_source, "Title_Screen_Setup"),
         extract_function(title_source, "Title_Screen_Update"),
         extract_function(title_source, "Title_SetCamUp3"),
+        "/* Keep the original overlay call boundary for title updates. */",
+        "void Title_Main(void);",
+        "void Title_Draw(void);",
+        "void Option_Main(void);",
+        "void Option_Entry_Draw(void);",
+        "void Option_GameOver(void);",
+        "void Option_8019E8C8(void);",
+        "void Map_Main(void);",
+        "void Map_Draw(void);",
+        "static int s_title_screen_draw_requested;",
+        extract_function(menu_dispatch_source, "OvlMenu_CallFunction"),
+        "/* Non-title overlay targets are excluded from this title-only build. */",
+        "void Title_Draw(void) {",
+        "    /* Mirrors the original Title_Draw TITLE_SCREEN dispatch gate. */",
+        "    s_title_screen_draw_requested = (sCutsceneState == TITLE_SCREEN);",
+        "}",
+        "int sf64_original_title_logic_draw(void) {",
+        "    s_title_screen_draw_requested = 0;",
+        "    if (gDrawMode != DRAW_TITLE) {",
+        "        return 0;",
+        "    }",
+        "    OvlMenu_CallFunction(OVLCALL_TITLE_DRAW, NULL);",
+        "    return s_title_screen_draw_requested;",
+        "}",
+        "void Option_Main(void) {}",
+        "void Option_Entry_Draw(void) {}",
+        "void Option_GameOver(void) {}",
+        "void Option_8019E8C8(void) {}",
+        "void Map_Main(void) {}",
+        "void Map_Draw(void) {}",
+        "/* These branches are unreachable in the title-only boot harness. */",
+        "void Title_Ranking_Update(void) {}",
+        "void Title_CsGreatFoxTraveling_Update(void) {}",
+        "void Title_CsTeamRunning_Update(void) {}",
+        "void Title_CsGreatFoxCloseUp_Update(void) {}",
+        "void Title_CsTakeOff_Update(void) {}",
+        "void Title_CsTakeOffSpace_Update(void) {}",
         "",
     ]
 

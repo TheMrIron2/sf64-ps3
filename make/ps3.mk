@@ -63,6 +63,7 @@ PS3_ORIGINAL_TITLE_SOURCE_FILES := \
 	$(SF64_SOURCE_DIR)/src/engine/fox_bg.c \
 	$(SF64_SOURCE_DIR)/src/engine/fox_play.c \
 	$(SF64_SOURCE_DIR)/src/engine/fox_std_lib.c \
+	$(SF64_SOURCE_DIR)/src/overlays/ovl_menu/fox_i_menu.c \
 	$(SF64_SOURCE_DIR)/src/overlays/ovl_menu/fox_title.c \
 	$(SF64_SOURCE_DIR)/src/libc_math64.c \
 	$(SF64_SOURCE_DIR)/src/sys/sys_math.c \
@@ -234,6 +235,7 @@ $(PS3_ORIGINAL_STARFIELD_OBJECT): $(PS3_ORIGINAL_STARFIELD_C)
 	$(PPU_CC) $(PS3_ORIGINAL_TITLE_CPPFLAGS) -D__cosf=cosf -D__sinf=sinf $(PS3_CFLAGS) -w -c -o $@ $<
 
 $(PS3_ORIGINAL_TITLE_LOGIC_C): $(SF64_SOURCE_DIR)/src/overlays/ovl_menu/fox_title.c \
+		$(SF64_SOURCE_DIR)/src/overlays/ovl_menu/fox_i_menu.c \
 		$(SF64_SOURCE_DIR)/src/engine/fox_std_lib.c \
 		$(SF64_SOURCE_DIR)/src/sys/sys_math.c \
 		$(SF64_SOURCE_DIR)/assets/yaml/us/rev1/ast_title.yaml \
