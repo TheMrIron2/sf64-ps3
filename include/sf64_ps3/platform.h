@@ -16,7 +16,7 @@ Sf64ApiState sf64_platform_trigger_vi_retrace(void);
 Sf64ApiState sf64_platform_receive_vi_message(void);
 Sf64ApiState sf64_platform_poll_controller(void);
 Sf64ApiState sf64_platform_probe_pi_read(void);
-Sf64ApiState sf64_platform_submit_dummy_gfx_task(void);
+Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void);
 void sf64_platform_shutdown(void);
 
 void sf64_stub_game_run_frame(int frame_index);
