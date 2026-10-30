@@ -1,6 +1,7 @@
 #include "sf64_ps3/platform.h"
 #include "sf64_ps3/port_config.h"
 #include "sf64_ps3/arwing.h"
+#include "sf64_ps3/title_ui.h"
 #include "sf64_ps3/title_starfield.h"
 #include "sf64_ps3/title_runtime.h"
 
@@ -18,6 +19,8 @@ static int s_vi_registered;
 #if defined(SF64_PS3_ARWING_PROBE)
 extern const unsigned char sf64_arwing_segment_data[];
 extern const unsigned int sf64_arwing_segment_size;
+extern const unsigned char sf64_title_segment_data[];
+extern const unsigned int sf64_title_segment_size;
 static u8 s_arwing_rdram[SF64_ARWING_RDRAM_REQUIRED_SIZE];
 static u8 s_title_starfield_commands[SF64_TITLE_STARFIELD_RDRAM_SIZE];
 static u32 s_title_starfield_command_bytes;
@@ -235,6 +238,7 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
 #if defined(SF64_PS3_ARWING_PROBE)
     N64ps3GfxTask task;
     Sf64ArwingBuildInfo info;
+    Sf64TitleUiInfo title_ui_info;
     Sf64OriginalTitleArwingPose original_pose;
     Sf64ArwingTitlePose arwing_pose;
     int title_draw_active;
@@ -280,6 +284,7 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
         printf("[sf64-ps3] original title starfield update failed\n");
         return SF64_API_FAILED;
     }
+    sf64_title_ui_reset();
     title_draw_active = sf64_original_title_logic_draw();
     if (title_draw_active <= 0) {
         if (title_draw_active == 0) {
@@ -302,6 +307,13 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
         printf("[sf64-ps3] failed to build original title starfield/Arwing task\n");
         return SF64_API_FAILED;
     }
+    if (sf64_title_ui_append_logo(&task,
+                                  sf64_title_segment_data,
+                                  sf64_title_segment_size,
+                                  &title_ui_info) != 0) {
+        printf("[sf64-ps3] failed to append original Star Fox title logo\n");
+        return SF64_API_FAILED;
+    }
     if (!s_arwing_task_logged) {
         printf("[sf64-ps3] original Title_Screen_Update pose "
                "pos=(%.1f,%.1f,%.1f) rot=(%.1f,%.1f,%.1f) scale=%.1f\n",
@@ -316,6 +328,9 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
                s_title_starfield_command_bytes / 8U,
                info.skeleton_limb_count, info.display_list_count,
                info.animation_frame, info.generated_command_count);
+        printf("[sf64-ps3] original Title_Draw logo strips=%u generated-commands=%u\n",
+               title_ui_info.logo_strip_count,
+               title_ui_info.generated_command_count);
         s_arwing_task_logged = 1;
     }
 

@@ -29,6 +29,10 @@ TITLE_ANIMATION_SYMBOLS = {
     "aTitleSlippySkel": "Limb **",
 }
 
+TITLE_TEXTURE_SYMBOLS = {
+    "aTitleStarfoxLogoTex": "u16",
+}
+
 
 def title_symbol_offset(yaml_source: str, name: str) -> int:
     match = re.search(
@@ -94,6 +98,25 @@ def main() -> int:
                 f"#define {name} ((Limb **)(uintptr_t)0x{address:08x}U)"
             )
 
+    for name, c_type in TITLE_TEXTURE_SYMBOLS.items():
+        address = title_symbol_offset(title_yaml, name)
+        aliases.append(
+            f"#define {name} (({c_type} *)(uintptr_t)0x{address:08x}U)"
+        )
+
+    title_logo_draw = extract_function(title_source, "Title_StarfoxLogo_Draw")
+    title_logo_draw = title_logo_draw.replace(
+        "RCP_SetupDL(&gMasterDisp, SETUPDL_83);",
+        "/* The title task supplies the original setup state. */",
+    )
+    title_logo_draw = title_logo_draw.replace(
+        "gDPSetPrimColor(gMasterDisp++, 0, 0, 255, 255, 255, 255);",
+        "/* Original logo pixels use full white primitive color. */",
+    )
+    title_logo_draw = title_logo_draw.replace(
+        "Lib_TextureRect_RGBA16(", "sf64_title_logo_rect("
+    )
+
     # The original PSP camera helper is retained because it is the title
     # source's platform implementation and avoids importing the full N64
     # matrix library just to produce the title camera basis.
@@ -139,6 +162,7 @@ def main() -> int:
         "extern s32 sRandSeed1;",
         "extern s32 sRandSeed2;",
         "extern s32 sRandSeed3;",
+        "extern void sf64_title_logo_rect(void *gfx_pointer, void *texture_pointer, uint32_t width, uint32_t height, float x, float y, float x_scale, float y_scale);",
         "",
         "/* N64 asset pointers stay 32-bit on the 64-bit PPU. */",
         "typedef struct Sf64N64Animation32 {",
@@ -151,6 +175,7 @@ def main() -> int:
         *aliases,
         "",
         extract_state_globals(title_source),
+        title_logo_draw,
         extract_function(title_source, "PspTitle_WrapRadians"),
         extract_function(title_source, "PspTitle_SinApprox"),
         extract_function(title_source, "PspTitle_CosApprox"),
@@ -187,6 +212,9 @@ def main() -> int:
         "void Title_Draw(void) {",
         "    /* Mirrors the original Title_Draw TITLE_SCREEN dispatch gate. */",
         "    s_title_screen_draw_requested = (sCutsceneState == TITLE_SCREEN);",
+        "    if (s_title_screen_draw_requested) {",
+        "        Title_StarfoxLogo_Draw();",
+        "    }",
         "}",
         "int sf64_original_title_logic_draw(void) {",
         "    s_title_screen_draw_requested = 0;",
