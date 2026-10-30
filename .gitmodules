@@ -1,3 +1,31 @@
 [submodule "extern/n64ps3"]
 	path = extern/n64ps3
 	url = https://github.com/TheMrIron2/n64ps3
+
+[submodule "game/tools/splat"]
+	path = game/tools/splat
+	url = https://github.com/ethteck/splat/
+
+[submodule "game/tools/asm-processor"]
+	path = game/tools/asm-processor
+	url = https://github.com/simonlindholm/asm-processor
+
+[submodule "game/tools/asm-differ"]
+	path = game/tools/asm-differ
+	url = https://github.com/simonlindholm/asm-differ
+
+[submodule "game/tools/m2c"]
+	path = game/tools/m2c
+	url = https://github.com/matt-kempster/m2c
+
+[submodule "game/tools/Torch"]
+	path = game/tools/Torch
+	url = https://github.com/HarbourMasters/Torch
+
+[submodule "game/lib/n64psp"]
+	path = game/lib/n64psp
+	url = https://github.com/TheMrIron2/n64psp.git
+
+[submodule "game/lib/pspgl"]
+	path = game/lib/pspgl
+	url = https://github.com/TheMrIron2/pspgl.git
