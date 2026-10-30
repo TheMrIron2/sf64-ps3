@@ -197,9 +197,12 @@ $(PS3_TRIANGLE_VPO): $(N64PS3_PS3_SHADER_DIR)/rdprsx_triangle.vcg
 	@mkdir -p $(dir $@)
 	LD_LIBRARY_PATH='$(CGCOMP_LD_LIBRARY_PATH)' $(CGCOMP) -v $< $@
 
-$(PS3_TRIANGLE_FPO): $(N64PS3_PS3_SHADER_DIR)/rdprsx_triangle.fcg
+$(PS3_TRIANGLE_FPO): $(N64PS3_PS3_SHADER_DIR)/rdprsx_triangle.fpa tools/check_rsx_gamma.py
 	@mkdir -p $(dir $@)
-	LD_LIBRARY_PATH='$(CGCOMP_LD_LIBRARY_PATH)' $(CGCOMP) -f $< $@
+	$(CGCOMP) -a -f -d $< $@.tmp
+	$(PYTHON) tools/check_rsx_gamma.py $@.tmp
+	mv $@.tmp $@
+	mv $@.tmp.dump $@.dump
 
 $(PS3_TRIANGLE_VPO_HEADER): $(PS3_TRIANGLE_VPO) tools/embed_binary.py
 	$(PYTHON) tools/embed_binary.py $< $@ rdprsx_triangle_vpo
@@ -244,7 +247,7 @@ $(PS3_ORIGINAL_TITLE_LOGIC_C): $(SF64_SOURCE_DIR)/src/overlays/ovl_menu/fox_titl
 	$(PYTHON) tools/extract_title_logic_source.py --sf64-source-dir $(SF64_SOURCE_DIR) --output $@
 
 $(PS3_ORIGINAL_TITLE_LOGIC_OBJECT): $(PS3_ORIGINAL_TITLE_LOGIC_C)
-	$(PPU_CC) $(PS3_ORIGINAL_TITLE_CPPFLAGS) -DTARGET_PSP $(PS3_CFLAGS) -w -c -o $@ $<
+	$(PPU_CC) -Iinclude $(PS3_ORIGINAL_TITLE_CPPFLAGS) -DTARGET_PSP $(PS3_CFLAGS) -w -c -o $@ $<
 
 $(PS3_TITLE_RUNTIME_OBJECT): src/sf64_title_runtime.c include/sf64_ps3/title_runtime.h | check-original-title-source
 	$(PPU_CC) $(PS3_CPPFLAGS) $(PS3_ORIGINAL_TITLE_CPPFLAGS) -DTARGET_PSP $(PS3_CFLAGS) -w -c -o $@ $<

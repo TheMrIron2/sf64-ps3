@@ -15,6 +15,7 @@ static OSMesgQueue s_vi_queue;
 static OSMesg s_vi_messages[4];
 static int s_queue_created;
 static int s_vi_registered;
+static int s_controller_initialized;
 
 #if defined(SF64_PS3_ARWING_PROBE)
 extern const unsigned char sf64_arwing_segment_data[];
@@ -201,16 +202,21 @@ Sf64ApiState sf64_platform_poll_controller(void)
     N64ps3ControllerState pad;
 
     memset(&pad, 0, sizeof(pad));
-    n64ps3_pad_init();
+    if (!s_controller_initialized) {
+        n64ps3_pad_init();
+        s_controller_initialized = 1;
+    }
     if (n64ps3_pad_read(0, &pad) != 0) {
         return SF64_API_FAILED;
     }
-
-    printf("[sf64-ps3] controller port=0 buttons=0x%04x stick=(%d,%d)\n",
-           pad.buttons,
-           pad.stick_x,
-           pad.stick_y);
-    return SF64_API_INCOMPLETE;
+#if defined(SF64_PS3_ARWING_PROBE)
+    if (s_original_title_logic_initialized) {
+        sf64_original_title_logic_set_controller(pad.buttons,
+                                                 pad.stick_x,
+                                                 pad.stick_y);
+    }
+#endif
+    return SF64_API_WORKED;
 }
 
 Sf64ApiState sf64_platform_probe_pi_read(void)
@@ -239,8 +245,13 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
     N64ps3GfxTask task;
     Sf64ArwingBuildInfo info;
     Sf64TitleUiInfo title_ui_info;
+    Sf64OriginalTitleLighting team_lighting;
     Sf64OriginalTitleArwingPose original_pose;
     Sf64ArwingTitlePose arwing_pose;
+    Sf64TitleTeamModel team_models[4];
+    u32 team_limb_count = 0U;
+    u32 team_display_list_count = 0U;
+    float n64_logo_position[3];
     int title_draw_active;
 
     if (!s_original_title_logic_initialized) {
@@ -261,7 +272,9 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
         s_original_title_logic_initialized = 1;
     }
     if (sf64_original_title_logic_update() != 0 ||
-        sf64_original_title_logic_get_arwing_pose(&original_pose) != 0) {
+        sf64_original_title_logic_get_arwing_pose(&original_pose) != 0 ||
+        sf64_original_title_logic_get_64_logo_position(n64_logo_position) != 0 ||
+        sf64_original_title_logic_get_team_lighting(&team_lighting) != 0) {
         printf("[sf64-ps3] original Title_Screen_Update failed\n");
         return SF64_API_FAILED;
     }
@@ -307,11 +320,41 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
         printf("[sf64-ps3] failed to build original title starfield/Arwing task\n");
         return SF64_API_FAILED;
     }
+    {
+        u32 team_index;
+        memset(team_models, 0, sizeof(team_models));
+        for (team_index = 0U; team_index < 4U; team_index++) {
+            if (sf64_original_title_logic_get_team_model(
+                    (int)team_index,
+                    &team_models[team_index].skeleton_address,
+                    &team_models[team_index].limb_count,
+                    team_models[team_index].position,
+                    team_models[team_index].rotation_degrees,
+                    &team_models[team_index].scale,
+                    team_models[team_index].joint_rotation_degrees) != 0) {
+                printf("[sf64-ps3] failed to read original title team pose %u\n",
+                       team_index);
+                return SF64_API_FAILED;
+            }
+        }
+    }
+    if (sf64_arwing_append_title_teams(&task,
+                                       sf64_title_segment_data,
+                                       sf64_title_segment_size,
+                                       team_models,
+                                       &team_lighting,
+                                       &team_limb_count,
+                                       &team_display_list_count) != 0) {
+        printf("[sf64-ps3] failed to append original title team skeletons\n");
+        return SF64_API_FAILED;
+    }
     if (sf64_title_ui_append_logo(&task,
                                   sf64_title_segment_data,
                                   sf64_title_segment_size,
+                                  n64_logo_position,
                                   &title_ui_info) != 0) {
-        printf("[sf64-ps3] failed to append original Star Fox title logo\n");
+        printf("[sf64-ps3] failed to append original Star Fox title logo: %s\n",
+               sf64_title_ui_last_error());
         return SF64_API_FAILED;
     }
     if (!s_arwing_task_logged) {
@@ -331,6 +374,29 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
         printf("[sf64-ps3] original Title_Draw logo strips=%u generated-commands=%u\n",
                title_ui_info.logo_strip_count,
                title_ui_info.generated_command_count);
+        printf("[sf64-ps3] original 64 logo panels=%u triangles=%u opaque-texels=%u "
+               "position=(%.1f,%.1f,%.1f) generated-display-list=1\n",
+               title_ui_info.n64_logo_panel_count,
+               title_ui_info.n64_logo_triangle_count,
+               title_ui_info.n64_logo_opaque_texels,
+               n64_logo_position[0], n64_logo_position[1],
+               n64_logo_position[2]);
+        printf("[sf64-ps3] original title team skeletons limbs=%u display-lists=%u "
+               "fox=(%.1f,%.1f,%.1f) falco=(%.1f,%.1f,%.1f); "
+               "press-start=%u\n",
+               team_limb_count, team_display_list_count,
+               team_models[0].position[0], team_models[0].position[1],
+               team_models[0].position[2], team_models[1].position[0],
+               team_models[1].position[1], team_models[1].position[2],
+               title_ui_info.press_start_drawn);
+        printf("[sf64-ps3] original title team light rgb=(%u,%u,%u) "
+               "ambient=(%u,%u,%u) direction=(%.1f,%.1f,%.1f)\n",
+               team_lighting.directional_rgb[0],
+               team_lighting.directional_rgb[1],
+               team_lighting.directional_rgb[2],
+               team_lighting.ambient_rgb[0], team_lighting.ambient_rgb[1],
+               team_lighting.ambient_rgb[2], team_lighting.direction[0],
+               team_lighting.direction[1], team_lighting.direction[2]);
         s_arwing_task_logged = 1;
     }
 

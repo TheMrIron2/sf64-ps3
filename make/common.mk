@@ -8,6 +8,7 @@ SF64_INCLUDE_DIRS := include
 
 SF64_COMMON_C_FILES := \
 	src/main.c \
+	src/sf64_display.c \
 	src/sf64_arwing.c \
 	src/sf64_title_ui.c \
 	src/sf64_platform_n64ps3.c \

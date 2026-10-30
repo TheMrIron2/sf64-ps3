@@ -74,6 +74,7 @@ int main(void)
         if (frame == 0) {
             printf("[sf64-ps3] rendering original Arwing geometry through n64ps3\n");
         }
+        (void)sf64_platform_poll_controller();
         issues += sf64_note_status("original Arwing title task",
                                    sf64_platform_submit_f3dex1_gfx_task(), 1);
         if (issues != 0) {

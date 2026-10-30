@@ -10,6 +10,9 @@ extern const unsigned int sf64_title_segment_size;
 
 extern void Title_Screen_Update(void);
 extern TitleArwingInfo sTitleArwing[4];
+extern f32 D_menu_801B905C;
+extern f32 D_menu_801B9060;
+extern f32 D_menu_801B9064;
 
 SaveFile gSaveFile;
 OSContPad gControllerPress[4];
@@ -155,4 +158,24 @@ int sf64_original_title_logic_get_arwing_pose(
     pose->rotation_degrees[1] = arwing->yRot;
     pose->rotation_degrees[2] = arwing->zRot;
     return 0;
+}
+
+int sf64_original_title_logic_get_64_logo_position(float position[3])
+{
+    if (!position || !s_title_logic_initialized) {
+        return -1;
+    }
+    position[0] = D_menu_801B905C;
+    position[1] = D_menu_801B9060;
+    position[2] = D_menu_801B9064;
+    return 0;
+}
+
+void sf64_original_title_logic_set_controller(u16 buttons,
+                                              s8 stick_x,
+                                              s8 stick_y)
+{
+    gControllerPress[0].button = buttons;
+    gControllerPress[0].stick_x = stick_x;
+    gControllerPress[0].stick_y = stick_y;
 }

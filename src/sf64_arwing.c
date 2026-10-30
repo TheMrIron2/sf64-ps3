@@ -1,4 +1,5 @@
 #include "sf64_ps3/arwing.h"
+#include "sf64_ps3/display.h"
 
 #include <math.h>
 #include <string.h>
@@ -9,6 +10,12 @@
 #define SF64_ARWING_MAX_LIMBS 32U
 #define SF64_ARWING_ROOT_LIST_OFFSET 0x00000100U
 #define SF64_ARWING_MATRIX_OFFSET 0x00007000U
+#define SF64_TITLE_TEAM_MATRIX_OFFSET 0x0008c000U
+#define SF64_TITLE_TEAM_MATRIX_ADDRESS 0x8008c000U
+#define SF64_TITLE_TEAM_MATRIX_LIMIT 128U
+#define SF64_TITLE_TEAM_LIGHT_OFFSET 0x0008b000U
+#define SF64_TITLE_TEAM_LIGHT_ADDRESS 0x8008b000U
+#define SF64_TITLE_SEGMENT_RDRAM_OFFSET 0x00030000U
 #define SF64_ARWING_LIGHT_OFFSET 0x00008000U
 #define SF64_ARWING_PROJECTION_OFFSET 0x00008040U
 #define SF64_ARWING_VIEW_MATRIX_OFFSET 0x00008080U
@@ -55,6 +62,9 @@ typedef struct Sf64ArwingLimb {
 typedef struct Sf64ArwingBuilder {
     const u8 *segment;
     u32 segment_size;
+    u32 segment_id;
+    u32 matrix_offset;
+    u32 matrix_address;
     const u32 *skeleton;
     float (*joint_angles)[3];
     u8 *rdram;
@@ -130,7 +140,7 @@ static int segment_offset(const Sf64ArwingBuilder *builder,
     u32 segment = address >> 24;
     u32 byte_offset = address & 0x00ffffffU;
 
-    if (segment != SF64_ARWING_SEGMENT_ID ||
+    if (segment != builder->segment_id ||
         byte_offset > builder->segment_size ||
         required_size > builder->segment_size - byte_offset) {
         return -1;
@@ -294,15 +304,21 @@ static void matrix_perspective(Sf64ArwingMatrix matrix)
 {
     const float degrees_to_radians = SF64_ARWING_TWO_PI / 360.0f;
     const float field_of_view_y = 45.0f;
-    const float aspect = 4.0f / 3.0f;
+    const float aspect = SF64_DISPLAY_REFERENCE_ASPECT;
     const float near_plane = 10.0f;
     const float far_plane = 12800.0f;
     float half_fov = field_of_view_y * degrees_to_radians * 0.5f;
     float cotangent = cosf(half_fov) / sinf(half_fov);
+    float scale_x;
+    float scale_y;
+
+    /* Match Starship's projected-X correction and PSP's display-aspect
+     * perspective while keeping the original title's 320x240 world layout. */
+    sf64_display_fit_4_3(sf64_display_aspect(), &scale_x, &scale_y);
 
     memset(matrix, 0, sizeof(Sf64ArwingMatrix));
-    matrix[0][0] = cotangent / aspect;
-    matrix[1][1] = cotangent;
+    matrix[0][0] = (cotangent / aspect) * scale_x;
+    matrix[1][1] = cotangent * scale_y;
     matrix[2][2] = (near_plane + far_plane) / (near_plane - far_plane);
     matrix[2][3] = -1.0f;
     matrix[3][2] = (2.0f * near_plane * far_plane) / (near_plane - far_plane);
@@ -511,11 +527,11 @@ static int emit_limb(Sf64ArwingBuilder *builder,
     matrix_rotate_x(local_matrix, builder->joint_angles[joint_index][0]);
 
     if (limb.display_list != 0U) {
-        u32 matrix_offset = SF64_ARWING_MATRIX_OFFSET +
+        u32 matrix_offset = builder->matrix_offset +
                             builder->display_list_count * SF64_ARWING_G_MTX_BYTES;
         u8 *matrix_bytes;
 
-        if (builder->display_list_count >= SF64_ARWING_MAX_LIMBS ||
+        if (builder->display_list_count >= SF64_TITLE_TEAM_MATRIX_LIMIT ||
             segment_offset(builder, limb.display_list, 8U, &joint_index) != 0) {
             return -1;
         }
@@ -524,7 +540,7 @@ static int emit_limb(Sf64ArwingBuilder *builder,
         matrix_write_n64(matrix_bytes, final_matrix);
         list_append(builder,
                     SF64_ARWING_G_MTX_MODELVIEW_LOAD,
-                    SF64_ARWING_MATRIX_ADDRESS +
+                    builder->matrix_address +
                         builder->display_list_count * SF64_ARWING_G_MTX_BYTES);
         list_append(builder, SF64_ARWING_G_DL, limb.display_list);
         builder->display_list_count++;
@@ -606,6 +622,7 @@ static int animation_read(const u8 *segment,
 
 static int skeleton_read(const u8 *segment,
                          u32 segment_size,
+                         u32 segment_id,
                          u32 skeleton[SF64_ARWING_MAX_LIMBS],
                          u32 *limb_count)
 {
@@ -626,7 +643,7 @@ static int skeleton_read(const u8 *segment,
             *limb_count = index;
             return index != 0U ? 0 : -1;
         }
-        if ((address >> 24) != SF64_ARWING_SEGMENT_ID ||
+        if ((address >> 24) != segment_id ||
             (address & 0x00ffffffU) > segment_size ||
             0x20U > segment_size - (address & 0x00ffffffU)) {
             return -1;
@@ -694,6 +711,24 @@ static void write_light_data(u8 *rdram)
     ambient[2] = 11U;
 }
 
+static void write_title_team_light_data(
+    u8 *rdram, const Sf64OriginalTitleLighting *lighting)
+{
+    u8 *directional = rdram + SF64_TITLE_TEAM_LIGHT_OFFSET;
+    u8 *ambient = directional + SF64_ARWING_LIGHT_DIRECTIONAL_BYTES;
+    u32 axis;
+
+    memset(directional, 0, SF64_ARWING_LIGHT_DIRECTIONAL_BYTES);
+    for (axis = 0U; axis < 3U; axis++) {
+        directional[axis] = lighting->directional_rgb[axis];
+        directional[8U + axis] = (u8)((s32)lighting->direction[axis] & 0xff);
+    }
+    memset(ambient, 0, SF64_ARWING_LIGHT_AMBIENT_BYTES);
+    for (axis = 0U; axis < 3U; axis++) {
+        ambient[axis] = lighting->ambient_rgb[axis];
+    }
+}
+
 static int sf64_arwing_build_title_task_internal(
     const u8 *segment,
     u32 segment_size,
@@ -738,11 +773,13 @@ static int sf64_arwing_build_title_task_internal(
                starfield_display_list, starfield_display_list_size);
     }
 
-    if (skeleton_read(segment, segment_size, skeleton, &skeleton_limb_count) != 0 ||
+    if (skeleton_read(segment, segment_size, SF64_ARWING_SEGMENT_ID,
+                      skeleton, &skeleton_limb_count) != 0 ||
         animation_read(segment, segment_size, &animation_limb_count, joint_angles) != 0 ||
         skeleton_limb_count != animation_limb_count ||
         limb_read(&(Sf64ArwingBuilder){ .segment = segment,
-                                        .segment_size = segment_size },
+                                        .segment_size = segment_size,
+                                        .segment_id = SF64_ARWING_SEGMENT_ID },
                   skeleton[0], &root_limb) != 0 ||
         find_joint_index(&(Sf64ArwingBuilder){ .skeleton = skeleton },
                          skeleton[0], &root_joint_index) != 0) {
@@ -760,6 +797,9 @@ static int sf64_arwing_build_title_task_internal(
     memset(&builder, 0, sizeof(builder));
     builder.segment = segment;
     builder.segment_size = segment_size;
+    builder.segment_id = SF64_ARWING_SEGMENT_ID;
+    builder.matrix_offset = SF64_ARWING_MATRIX_OFFSET;
+    builder.matrix_address = SF64_ARWING_MATRIX_ADDRESS;
     builder.skeleton = skeleton;
     builder.joint_angles = joint_angles;
     builder.rdram = rdram;
@@ -875,4 +915,243 @@ int sf64_arwing_build_title_task_with_starfield(
         segment, segment_size, starfield_display_list,
         starfield_display_list_size, title_star_count,
         rdram, rdram_size, task, info);
+}
+
+int sf64_arwing_append_title_teams(N64ps3GfxTask *task,
+                                   const u8 *title_segment,
+                                   u32 title_segment_size,
+                                   const Sf64TitleTeamModel models[4],
+                                   const Sf64OriginalTitleLighting *lighting,
+                                   u32 *limb_count,
+                                   u32 *display_list_count)
+{
+    u8 *rdram;
+    u32 total_limbs = 0U;
+    u32 current_display_lists;
+    u32 command_count;
+    u32 team_index;
+    Sf64ArwingMatrix projection_matrix;
+    Sf64ArwingMatrix view_matrix;
+    const float radians_per_degree = SF64_ARWING_TWO_PI / 360.0f;
+
+    if (!task || !task->dram_base || !task->display_list ||
+        !title_segment || !models || !lighting ||
+        task->kind != N64PS3_GFX_TASK_DISPLAY_LIST ||
+        SF64_TITLE_SEGMENT_RDRAM_OFFSET + title_segment_size >
+            task->dram_size_bytes ||
+        task->display_list_size_bytes < SF64_ARWING_GFX_COMMAND_BYTES ||
+        (task->display_list_size_bytes % SF64_ARWING_GFX_COMMAND_BYTES) != 0U) {
+        return -1;
+    }
+
+    rdram = (u8 *)(uintptr_t)task->dram_base;
+    memcpy(rdram + SF64_TITLE_SEGMENT_RDRAM_OFFSET,
+           title_segment, title_segment_size);
+    current_display_lists = 0U;
+    command_count = (u32)(task->display_list_size_bytes /
+                          SF64_ARWING_GFX_COMMAND_BYTES) - 1U;
+    if (SF64_ARWING_ROOT_LIST_OFFSET +
+            (command_count + 512U) * SF64_ARWING_GFX_COMMAND_BYTES >
+        SF64_ARWING_MATRIX_OFFSET) {
+        return -1;
+    }
+
+    matrix_look_at(view_matrix,
+                   0.0f, 180.0f, 430.0f,
+                   0.0f, 180.0f, 0.0f,
+                   0.0f, 1.0f, 0.0f);
+    matrix_perspective(projection_matrix);
+    matrix_write_n64(rdram + SF64_ARWING_PROJECTION_OFFSET,
+                     projection_matrix);
+    matrix_write_n64(rdram + SF64_ARWING_VIEW_MATRIX_OFFSET, view_matrix);
+    write_title_team_light_data(rdram, lighting);
+    list_append(&(Sf64ArwingBuilder){
+                    .rdram = rdram,
+                    .root_command_count = command_count,
+                },
+                0xbc001806U, 0x80030000U);
+    command_count++;
+    list_append(&(Sf64ArwingBuilder){
+                    .rdram = rdram,
+                    .root_command_count = command_count,
+                },
+                SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                SF64_ARWING_VIEW_MATRIX_ADDRESS);
+    command_count++;
+    list_append(&(Sf64ArwingBuilder){
+                    .rdram = rdram,
+                    .root_command_count = command_count,
+                },
+                SF64_ARWING_G_MOVEWORD_NUMLIGHT, 0x00000040U);
+    command_count++;
+    list_append(&(Sf64ArwingBuilder){
+                    .rdram = rdram,
+                    .root_command_count = command_count,
+                },
+                SF64_ARWING_G_MOVEMEM_LIGHT,
+                SF64_TITLE_TEAM_LIGHT_ADDRESS);
+    command_count++;
+    list_append(&(Sf64ArwingBuilder){
+                    .rdram = rdram,
+                    .root_command_count = command_count,
+                },
+                SF64_ARWING_G_MOVEMEM_AMBIENT,
+                SF64_TITLE_TEAM_LIGHT_ADDRESS +
+                    SF64_ARWING_LIGHT_DIRECTIONAL_BYTES);
+    command_count++;
+    list_append(&(Sf64ArwingBuilder){
+                    .rdram = rdram,
+                    .root_command_count = command_count,
+                },
+                SF64_ARWING_G_SETGEOMETRYMODE,
+                SF64_ARWING_G_LIGHTING_ZBUFFER);
+    command_count++;
+
+    for (team_index = 0U; team_index < 4U; team_index++) {
+        u32 skeleton[SF64_ARWING_MAX_LIMBS];
+        u32 skeleton_limb_count;
+        u32 root_joint_index;
+        Sf64ArwingBuilder builder;
+        Sf64ArwingLimb root_limb;
+        float joint_angles[SF64_ARWING_MAX_LIMBS + 1U][3];
+        Sf64ArwingMatrix parent_matrix;
+        Sf64ArwingMatrix world_matrix;
+        Sf64ArwingMatrix title_world_matrix;
+        Sf64ArwingMatrix final_matrix;
+        u32 skeleton_offset = models[team_index].skeleton_address & 0x00ffffffU;
+        u32 index;
+
+        if ((models[team_index].skeleton_address >> 24) != 6U) {
+            return -1;
+        }
+        /* The team skeleton pointer is a segmented pointer to a pointer table. */
+        for (index = 0U; index < SF64_ARWING_MAX_LIMBS; index++) {
+            u32 pointer_offset = skeleton_offset + index * 4U;
+            u32 address;
+            if (pointer_offset > title_segment_size ||
+                4U > title_segment_size - pointer_offset) {
+                return -1;
+            }
+            address = read_be32(title_segment + pointer_offset);
+            if (address == 0U) {
+                skeleton_limb_count = index;
+                skeleton[index] = 0U;
+                break;
+            }
+            if ((address >> 24) != 6U ||
+                (address & 0x00ffffffU) > title_segment_size ||
+                0x20U > title_segment_size - (address & 0x00ffffffU)) {
+                return -1;
+            }
+            skeleton[index] = address;
+        }
+        if (index == SF64_ARWING_MAX_LIMBS ||
+            skeleton_limb_count != models[team_index].limb_count ||
+            find_joint_index(&(Sf64ArwingBuilder){ .skeleton = skeleton },
+                             skeleton[0], &root_joint_index) != 0) {
+            return -1;
+        }
+
+        memset(&builder, 0, sizeof(builder));
+        builder.segment = title_segment;
+        builder.segment_size = title_segment_size;
+        builder.segment_id = 6U;
+        builder.matrix_offset = SF64_TITLE_TEAM_MATRIX_OFFSET;
+        builder.matrix_address = SF64_TITLE_TEAM_MATRIX_ADDRESS;
+        builder.skeleton = skeleton;
+        builder.joint_angles = joint_angles;
+        builder.rdram = rdram;
+        builder.root_command_count = command_count;
+        builder.display_list_count = current_display_lists;
+        for (index = 0U; index < models[team_index].limb_count; index++) {
+            builder.joint_angles[index + 1U][0] =
+                models[team_index].joint_rotation_degrees[index][0] *
+                radians_per_degree;
+            builder.joint_angles[index + 1U][1] =
+                models[team_index].joint_rotation_degrees[index][1] *
+                radians_per_degree;
+            builder.joint_angles[index + 1U][2] =
+                models[team_index].joint_rotation_degrees[index][2] *
+                radians_per_degree;
+        }
+        if (limb_read(&(Sf64ArwingBuilder){
+                           .segment = title_segment,
+                           .segment_size = title_segment_size,
+                           .segment_id = 6U,
+                       },
+                       skeleton[0], &root_limb) != 0) {
+            return -1;
+        }
+
+        matrix_identity(title_world_matrix);
+        matrix_translate(title_world_matrix,
+                         models[team_index].position[0],
+                         models[team_index].position[1],
+                         models[team_index].position[2]);
+        matrix_scale(title_world_matrix, models[team_index].scale,
+                     models[team_index].scale, models[team_index].scale);
+        matrix_rotate_z(title_world_matrix,
+                        models[team_index].rotation_degrees[2] *
+                            radians_per_degree);
+        matrix_rotate_y(title_world_matrix,
+                        models[team_index].rotation_degrees[1] *
+                            radians_per_degree);
+        matrix_rotate_x(title_world_matrix,
+                        models[team_index].rotation_degrees[0] *
+                            radians_per_degree);
+        matrix_multiply(world_matrix, view_matrix, title_world_matrix);
+
+        matrix_identity(parent_matrix);
+        matrix_translate(parent_matrix,
+                         root_limb.translation[0],
+                         root_limb.translation[1],
+                         root_limb.translation[2]);
+        matrix_rotate_z(parent_matrix,
+                        builder.joint_angles[root_joint_index][2]);
+        matrix_rotate_y(parent_matrix,
+                        builder.joint_angles[root_joint_index][1]);
+        matrix_rotate_x(parent_matrix,
+                        builder.joint_angles[root_joint_index][0]);
+
+        if (root_limb.display_list != 0U) {
+            if (current_display_lists >= SF64_TITLE_TEAM_MATRIX_LIMIT) {
+                return -1;
+            }
+            matrix_multiply(final_matrix, world_matrix, parent_matrix);
+            matrix_write_n64(rdram + SF64_TITLE_TEAM_MATRIX_OFFSET +
+                                 current_display_lists *
+                                     SF64_ARWING_G_MTX_BYTES,
+                             final_matrix);
+            list_append(&builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                        SF64_TITLE_TEAM_MATRIX_ADDRESS +
+                            current_display_lists * SF64_ARWING_G_MTX_BYTES);
+            list_append(&builder, SF64_ARWING_G_DL, root_limb.display_list);
+            current_display_lists++;
+            builder.display_list_count = current_display_lists;
+        }
+        if (root_limb.child != 0U &&
+            emit_limb(&builder, root_limb.child, &parent_matrix,
+                      &world_matrix) != 0) {
+            return -1;
+        }
+        command_count = builder.root_command_count;
+        current_display_lists = builder.display_list_count;
+        total_limbs += skeleton_limb_count;
+    }
+
+    list_append(&(Sf64ArwingBuilder){
+                    .rdram = rdram,
+                    .root_command_count = command_count,
+                },
+                SF64_ARWING_G_ENDDL, 0U);
+    task->display_list_size_bytes =
+        (command_count + 1U) * SF64_ARWING_GFX_COMMAND_BYTES;
+    task->debug_name = "SF64 title starfield, team, Arwing, and logos";
+    if (limb_count) {
+        *limb_count = total_limbs;
+    }
+    if (display_list_count) {
+        *display_list_count = current_display_lists;
+    }
+    return 0;
 }

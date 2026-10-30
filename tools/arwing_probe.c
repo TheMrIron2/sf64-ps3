@@ -106,7 +106,8 @@ static int record_triangle(void *user_data,
     u32 vertex_index;
 
     probe->triangles++;
-    if (a->texture_enabled && a->texture_rgba16) {
+    if (a->texture_enabled && a->texture_data &&
+        a->texture_bytes_per_texel == 2U) {
         u32 texture_index;
         u32 vertex_index;
 
@@ -190,7 +191,7 @@ static int record_triangle(void *user_data,
         probe->textured_triangles++;
         for (texture_index = 0; texture_index < probe->unique_textures;
              texture_index++) {
-            if (probe->texture_sources[texture_index] == a->texture_rgba16 &&
+            if (probe->texture_sources[texture_index] == a->texture_data &&
                 probe->texture_widths[texture_index] == a->texture_width &&
                 probe->texture_heights[texture_index] == a->texture_height) {
                 break;
@@ -198,7 +199,7 @@ static int record_triangle(void *user_data,
         }
         if (texture_index == probe->unique_textures &&
             probe->unique_textures < 64U) {
-            const u8 *bytes = a->texture_rgba16;
+            const u8 *bytes = a->texture_data;
             u32 byte_count = (u32)a->texture_width * a->texture_height * 2U;
             u32 hash = 2166136261U;
             u32 byte_index;
@@ -206,7 +207,7 @@ static int record_triangle(void *user_data,
             for (byte_index = 0; byte_index < byte_count; byte_index++) {
                 hash = (hash ^ bytes[byte_index]) * 16777619U;
             }
-            probe->texture_sources[texture_index] = a->texture_rgba16;
+            probe->texture_sources[texture_index] = a->texture_data;
             probe->texture_widths[texture_index] = a->texture_width;
             probe->texture_heights[texture_index] = a->texture_height;
             probe->texture_hashes[texture_index] = hash;
