@@ -1,0 +1,69 @@
+
+
+#include "sys.h"
+#include "src/psp/eeprom_store.h"
+
+SaveFile gSaveIOBuffer;
+SaveFile sPrevSaveData;
+
+s32 Save_ReadBlock(s32 arg0, u8* arg1) {
+    if (osEepromRead(&gSerialEventQueue, arg0, arg1)) {
+        PRINTF("ＥＥＰＲＯＭ インターフェース回路反応なし (ＲＥＡＤ)\n");
+        return -1;
+    } else {
+        PRINTF("EEPROM READ  %02X: %02X %02X %02X %02X %02X %02X %02X %02X\n");
+        return 0;
+    }
+}
+
+s32 Save_WriteBlock(s32 arg0, u8* arg1) {
+    if (osEepromWrite(&gSerialEventQueue, arg0, arg1)) {
+        PRINTF("ＥＥＰＲＯＭ インターフェース回路反応なし (ＷＲＩＴＥ)\n");
+        return -1;
+    } else {
+        Timer_Wait(MSEC_TO_CYCLES(15));
+        PRINTF("EEPROM WRITE %02X: %02X %02X %02X %02X %02X %02X %02X %02X\n");
+        return 0;
+    }
+}
+
+s32 Save_WriteEeprom(SaveFile* arg0) {
+    s32 i;
+    s32 j;
+
+    if (osEepromProbe(&gSerialEventQueue) != 1) {
+        PRINTF("ＥＥＰＲＯＭ が ありません\n");
+        return -1;
+    }
+
+    if (!PspEeprom_BeginTransaction()) return -1;
+    for (i = 0; i < EEPROM_MAXBLOCKS; i++) {
+        s32 changed = 0;
+        for (j = 0; j < EEPROM_BLOCK_SIZE; j++) {
+            if (((char*) &sPrevSaveData)[EEPROM_BLOCK_SIZE * i + j] != ((char*) arg0)[EEPROM_BLOCK_SIZE * i + j]) changed = 1;
+        }
+        if (changed && osEepromWrite(&gSerialEventQueue, i, &((u8*) arg0)[EEPROM_BLOCK_SIZE * i])) {
+            PspEeprom_AbortTransaction();
+            return -1;
+        }
+    }
+    if (!PspEeprom_CommitTransaction()) return -1;
+    sPrevSaveData = *arg0;
+    return 0;
+}
+
+s32 Save_ReadEeprom(SaveFile* arg0) {
+    s32 i;
+
+    if (osEepromProbe(&gSerialEventQueue) != 1) {
+        PRINTF("ＥＥＰＲＯＭ が ありません\n");
+        return -1;
+    }
+    for (i = 0; i < EEPROM_MAXBLOCKS; i++) {
+        if (Save_ReadBlock(i, &((char*) arg0)[EEPROM_BLOCK_SIZE * i]) != 0) {
+            return -1;
+        }
+    }
+    sPrevSaveData = *arg0;
+    return 0;
+}

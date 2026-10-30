@@ -1,0 +1,915 @@
+#include "sys.h"
+#include "sf64audio_external.h"
+#include "mods.h"
+#include "src/sys/task_pending.h"
+#ifdef TARGET_PSP
+#include "global.h"
+#include "src/psp/frame_interpolation.h"
+#include "src/psp/gu_census.h"
+#include "src/psp/frame_scheduler.h"
+#include "src/psp/input.h"
+#include "src/psp/audio_mode.h"
+#include "src/psp/menu.h"
+#include "src/psp/platform.h"
+#include "src/psp/profiler.h"
+#include "src/psp/renderer.h"
+#endif
+
+#if defined(TARGET_PSP) && !defined(PSP_TRACE_ENABLED)
+#define PSP_TRACE_ENABLED 0
+#endif
+
+#if defined(TARGET_PSP) && PSP_TRACE_ENABLED
+void PspPlatform_LogLine(const char* line);
+void PspPlatform_LogFrame(const char* phase, u32 frame);
+#define PSP_TRACE(msg) PspPlatform_LogLine("[psp] " msg)
+#define PSP_TRACE_FRAME(phase, frame) PspPlatform_LogFrame((phase), (frame))
+#else
+#define PSP_TRACE(msg) ((void) 0)
+#define PSP_TRACE_FRAME(phase, frame) ((void) 0)
+#endif
+
+s32 sGammaMode = 1;
+
+SPTask* gCurrentTask;
+SPTask* sAudioTasks[1];
+SPTask* sGfxTasks[2];
+static MainTaskPendingQueue sPendingTasks;
+u32 gTaskQueueMaxDrainBatch;
+u32 gTaskPendingAudioMax;
+u32 gTaskPendingGfxMax;
+u32 gTaskCapacityPressure;
+u32 gTaskInvalidMessages;
+u32 gTaskUnsupportedTypes;
+u32 gTaskCompletionFailures;
+u32 gSegments[16];          // 800E1FD0
+OSMesgQueue gPiMgrCmdQueue; // 800E2010
+OSMesg sPiMgrCmdBuff[50];   // 800E2028
+
+OSMesgQueue gDmaMesgQueue;
+void* sDmaMsgBuff[1];
+OSIoMesg gDmaIOMsg;
+OSMesgQueue gSerialEventQueue;
+void* sSerialEventBuff[1];
+OSMesgQueue gMainThreadMesgQueue;
+void* sMainThreadMsgBuff[32];
+OSMesgQueue gTaskMesgQueue;
+void* sTaskMsgBuff[16];
+OSMesgQueue gAudioVImesgQueue;
+void* sAudioVImsgBuff[1];
+OSMesgQueue gAudioTaskMesgQueue;
+void* sAudioTaskMsgBuff[1];
+OSMesgQueue gGfxVImesgQueue;
+void* sGfxVImsgBuff[4];
+OSMesgQueue gGfxTaskMesgQueue;
+void* sGfxTaskMsgBuff[2];
+OSMesgQueue gSerialThreadMesgQueue;
+void* sSerialThreadMsgBuff[8];
+OSMesgQueue gControllerMesgQueue;
+void* sControllerMsgBuff[1];
+OSMesgQueue gSaveMesgQueue;
+void* sSaveMsgBuff[1];
+OSMesgQueue gTimerTaskMesgQueue;
+void* sTimerTaskMsgBuff[16];
+OSMesgQueue gTimerWaitMesgQueue;
+void* sTimerWaitMsgBuff[1];
+
+#ifdef TARGET_PSP
+GfxPool gGfxPools[2] __attribute__((aligned(16)));
+#else
+GfxPool gGfxPools[2];
+#endif
+
+GfxPool* gGfxPool;
+SPTask* gGfxTask;
+Vp* gViewport;
+Mtx* gGfxMtx;
+Gfx* gUnkDisp1;
+Gfx* gMasterDisp;
+Gfx* gUnkDisp2;
+Lightsn* gLight;
+FrameBuffer* gFrameBuffer;
+u16* gTextureRender;
+
+u8 gVIsPerFrame;
+u32 gSysFrameCount;
+u8 gStartNMI;
+u8 gStopTasks;
+u8 gControllerRumbleFlags[4];
+u16 gFillScreenColor;
+u16 gFillScreen;
+
+u8 gUnusedStack[0x1000];
+OSThread sIdleThread;            // 80138E90
+u8 sIdleThreadStack[0x1000];     // 801390A0
+OSThread gMainThread;            // 8013A040
+u8 sMainThreadStack[0x1000];     // 8013A1F0
+OSThread gAudioThread;           // 8013B1F0
+u8 gAudioThreadStack[0x1000];    // 800DDAA0
+OSThread gGraphicsThread;        // 800DEAA0
+u8 gGraphicsThreadStack[0x1000]; // 800DEC50
+OSThread gTimerThread;           // 800DFC50
+u8 gTimerThreadStack[0x1000];    // 800DFE00
+OSThread gSerialThread;          // 800E0E00
+u8 gSerialThreadStack[0x1000];   // 800E0FB0
+
+void Main_Initialize(void) {
+    u8 i;
+
+    gVIsPerFrame = 0;
+    gSysFrameCount = 0;
+    gStartNMI = false;
+    gStopTasks = false;
+    gFillScreenColor = 0;
+    gFillScreen = false;
+    gCurrentTask = NULL;
+#ifdef TARGET_PSP
+    PspFrameInterpolation_Reset();
+#endif
+
+    for (i = 0; i < ARRAY_COUNT(sAudioTasks); i += 1) {
+        sAudioTasks[i] = NULL;
+    }
+    for (i = 0; i < ARRAY_COUNT(sGfxTasks); i += 1) {
+        sGfxTasks[i] = NULL;
+    }
+    MainTaskPending_Init(&sPendingTasks);
+    gTaskQueueMaxDrainBatch = 0;
+    gTaskPendingAudioMax = 0;
+    gTaskPendingGfxMax = 0;
+    gTaskCapacityPressure = 0;
+    gTaskInvalidMessages = 0;
+    gTaskUnsupportedTypes = 0;
+    gTaskCompletionFailures = 0;
+}
+
+void Audio_ThreadEntry(void* arg0) {
+    SPTask* task;
+
+    PSP_TRACE("audio init");
+    AudioLoad_Init();
+#ifdef TARGET_PSP
+    PspPlatform_LogLine("[psp-audio] sound initialization begin");
+#endif
+    Audio_InitSounds();
+#ifdef TARGET_PSP
+    PspPlatform_LogLine("[psp-audio] sound initialization complete");
+    PspPlatform_LogLine("[psp-audio] first synthesis begin");
+#endif
+    PSP_TRACE("audio ready");
+
+#ifdef TARGET_PSP
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_AUDIO_SYNTHESIS);
+#endif
+    task = AudioThread_CreateTask();
+#ifdef TARGET_PSP
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_AUDIO_SYNTHESIS);
+#endif
+#ifdef TARGET_PSP
+    PspPlatform_LogLine("[psp-audio] first synthesis complete");
+#endif
+    if (task != NULL) {
+#if defined(TARGET_PSP) && PSP_AUDIO
+        // PSP audio synthesis runs outside the RSP scheduler
+#else
+        task->mesgQueue = &gAudioTaskMesgQueue;
+        task->msg = (OSMesg) TASK_MESG_1;
+        osWritebackDCacheAll();
+        osSendMesg(&gTaskMesgQueue, task, OS_MESG_BLOCK);
+#endif
+    }
+
+    while (true) {
+#ifdef TARGET_PSP
+        PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_AUDIO_SYNTHESIS);
+#endif
+        task = AudioThread_CreateTask();
+#ifdef TARGET_PSP
+        PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_AUDIO_SYNTHESIS);
+#endif
+        if (task != NULL) {
+#if defined(TARGET_PSP) && PSP_AUDIO
+            // Output backpressure paces PSP synthesis
+#else
+            task->mesgQueue = &gAudioTaskMesgQueue;
+            task->msg = (OSMesg) TASK_MESG_1;
+            osWritebackDCacheAll();
+#endif
+        }
+#if defined(TARGET_PSP) && PSP_AUDIO
+        if (PspAudioMode_GetActive() == PSP_AUDIO_OFF || task == NULL) {
+            MQ_WAIT_FOR_MESG(&gAudioVImesgQueue, NULL);
+        }
+        continue;
+#else
+        MQ_GET_MESG(&gAudioTaskMesgQueue, NULL);
+
+        if (task != NULL) {
+            osSendMesg(&gTaskMesgQueue, task, OS_MESG_BLOCK);
+        }
+        MQ_WAIT_FOR_MESG(&gAudioVImesgQueue, NULL);
+#endif
+    }
+}
+
+static void Graphics_PrepareTask(void) {
+    gGfxTask->mesgQueue = &gGfxTaskMesgQueue;
+    gGfxTask->msg = (OSMesg) TASK_MESG_2;
+    gGfxTask->task.t.type = M_GFXTASK;
+    gGfxTask->task.t.flags = 0;
+    gGfxTask->task.t.ucode_boot = rspbootTextStart;
+    gGfxTask->task.t.ucode_boot_size = (uintptr_t) rspbootTextEnd - (uintptr_t) rspbootTextStart;
+    gGfxTask->task.t.ucode = gspF3DEX_fifoTextStart;
+    gGfxTask->task.t.ucode_size = SP_UCODE_SIZE;
+    gGfxTask->task.t.ucode_data = (u64*) &gspF3DEX_fifoDataStart;
+    gGfxTask->task.t.ucode_data_size = SP_UCODE_DATA_SIZE;
+    gGfxTask->task.t.dram_stack = gDramStack;
+    gGfxTask->task.t.dram_stack_size = SP_DRAM_STACK_SIZE8;
+    gGfxTask->task.t.output_buff = (u64*) gTaskOutputBuffer;
+    gGfxTask->task.t.output_buff_size = (u64*) gAudioHeap;
+    gGfxTask->task.t.data_ptr = (u64*) gGfxPool->masterDL;
+    gGfxTask->task.t.data_size = (gMasterDisp - gGfxPool->masterDL) * sizeof(Gfx);
+    gGfxTask->task.t.yield_data_ptr = (u64*) &gOSYieldData;
+    gGfxTask->task.t.yield_data_size = OS_YIELD_DATA_SIZE;
+    osWritebackDCacheAll();
+}
+
+static s32 Graphics_SubmitTask(SPTask* task) {
+#if defined(TARGET_PSP) && PSP_GFX_BACKEND_GU
+    s32 result = osSendMesg(&gTaskMesgQueue, task, OS_MESG_BLOCK);
+
+    if (result == 0) {
+        // Wake the renderer without waiting for another VI
+        osSendMesg(&gMainThreadMesgQueue, (OSMesg) EVENT_MESG_TASK_READY, OS_MESG_NOBLOCK);
+    }
+    return result;
+#else
+    return osSendMesg(&gTaskMesgQueue, task, OS_MESG_BLOCK);
+#endif
+}
+
+void Graphics_SetTask(void) {
+    Graphics_PrepareTask();
+    Graphics_SubmitTask(gGfxTask);
+}
+
+void Graphics_InitializeTask(u32 frameCount) {
+    gGfxPool = &gGfxPools[frameCount % 2];
+
+    gGfxTask = &gGfxPool->task;
+    gViewport = gGfxPool->viewports;
+    gGfxMtx = gGfxPool->mtx;
+    gUnkDisp1 = gGfxPool->unkDL1;
+    gMasterDisp = gGfxPool->masterDL;
+    gUnkDisp2 = gGfxPool->unkDL2;
+    gLight = gGfxPool->lights;
+
+    gFrameBuffer = &gFrameBuffers[frameCount % 3];
+    gTextureRender = &gTextureRenderBuffer[0];
+
+    gGfxMatrix = &sGfxMatrixStack[0];
+    gCalcMatrix = &sCalcMatrixStack[0];
+
+    D_80178710 = &D_80178580[0];
+}
+
+void Main_SetVIMode(void) {
+    if ((gControllerHold[0].button & D_JPAD) && (gControllerHold[1].button & D_JPAD) &&
+        (gControllerHold[2].button & D_JPAD) && (gControllerHold[3].button & L_TRIG) &&
+        (gControllerHold[3].button & R_TRIG) && (gControllerHold[3].button & Z_TRIG)) {
+        sGammaMode = 1 - sGammaMode;
+    }
+
+    switch (osTvType) {
+        case OS_TV_PAL:
+            osViSetMode(&osViModePalLan1);
+            break;
+        case OS_TV_MPAL:
+            osViSetMode(&osViModeMpalLan1);
+            break;
+        default:
+        case OS_TV_NTSC:
+            osViSetMode(&osViModeNtscLan1);
+            break;
+    }
+
+    if (sGammaMode != 0) {
+        osViSetSpecialFeatures(OS_VI_DITHER_FILTER_ON | OS_VI_DIVOT_OFF | OS_VI_GAMMA_ON | OS_VI_GAMMA_DITHER_ON);
+    } else {
+        osViSetSpecialFeatures(OS_VI_DITHER_FILTER_ON | OS_VI_DIVOT_OFF | OS_VI_GAMMA_OFF | OS_VI_GAMMA_DITHER_OFF);
+    }
+}
+
+void SerialInterface_ThreadEntry(void* arg0) {
+    OSMesg sp34;
+
+    PSP_TRACE("serial init");
+    Controller_Init();
+    PSP_TRACE("serial ready");
+    while (true) {
+        MQ_WAIT_FOR_MESG(&gSerialThreadMesgQueue, &sp34);
+
+        switch ((s32) sp34) {
+            case SI_READ_CONTROLLER:
+                Controller_ReadData();
+                break;
+            case SI_READ_SAVE:
+                Save_ReadData();
+                break;
+            case SI_WRITE_SAVE:
+                Save_WriteData();
+                break;
+            case SI_RUMBLE:
+                Controller_Rumble();
+                break;
+        }
+    }
+}
+
+void Timer_ThreadEntry(void* arg0) {
+    void* sp24;
+
+    PSP_TRACE("timer ready");
+    while (true) {
+        MQ_WAIT_FOR_MESG(&gTimerTaskMesgQueue, &sp24);
+        Timer_CompleteTask(sp24);
+    }
+}
+
+#ifdef TARGET_PSP
+#define PSP_MAX_SIMULATION_TICKS_PER_WAKE 2
+
+static u8 Graphics_GetPresentationVIs(void) {
+    return PspFrameScheduler_GetPresentationVIs();
+}
+
+static s32 Graphics_InterpolationEligible(void) {
+    return gVIsPerFrame > Graphics_GetPresentationVIs();
+}
+
+static void Graphics_FinalizeDisplayList(void) {
+    if (gStartNMI == 1) {
+        Graphics_NMIWipe();
+    }
+    gSPEndDisplayList(gUnkDisp1++);
+    gSPEndDisplayList(gUnkDisp2++);
+    gSPDisplayList(gMasterDisp++, gGfxPool->unkDL2);
+    gDPFullSync(gMasterDisp++);
+    gSPEndDisplayList(gMasterDisp++);
+}
+
+static SPTask* Graphics_BuildSimulationTask(u32 simulationVi) {
+    gSysFrameCount++;
+    Graphics_InitializeTask(gSysFrameCount);
+    PspFrameInterpolation_BeginSimulationFrame(gGfxTask, simulationVi, gVIsPerFrame,
+                                               Graphics_InterpolationEligible());
+    MQ_WAIT_FOR_MESG(&gControllerMesgQueue, NULL);
+    PspInput_FilterGameInput(sNextController);
+    Controller_UpdateInput();
+    osSendMesg(&gSerialThreadMesgQueue, (OSMesg) SI_READ_CONTROLLER, OS_MESG_NOBLOCK);
+    if (gControllerPress[3].button & U_JPAD) {
+        Main_SetVIMode();
+    }
+
+    gSPSegment(gUnkDisp1++, 0, 0);
+    gSPDisplayList(gMasterDisp++, gGfxPool->unkDL1);
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_GAME_UPDATE);
+    PspCensus_Simulation(0);
+    Game_Update();
+    PspCensus_Simulation(1);
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_GAME_UPDATE);
+    PspFrameInterpolation_EndSimulationFrame(gGfxTask, Graphics_InterpolationEligible());
+    Graphics_FinalizeDisplayList();
+    Graphics_PrepareTask();
+    return gGfxTask;
+}
+
+static void Graphics_WaitForTask(s32* taskInFlight) {
+    if (!*taskInFlight) {
+        return;
+    }
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_GFX_TASK_BACKPRESSURE);
+    MQ_WAIT_FOR_MESG(&gGfxTaskMesgQueue, NULL);
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_GFX_TASK_BACKPRESSURE);
+    *taskInFlight = false;
+}
+
+static void Graphics_UpdateAudio(void) {
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_AUDIO_UPDATE);
+    Audio_Update();
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_AUDIO_UPDATE);
+}
+
+static void Graphics_RunPspScheduler(SPTask* reusableTask, FrameBuffer* reusableFrameBuffer, s32 taskInFlight) {
+    PspFrameScheduler scheduler;
+    PspFrameSchedule schedule;
+    SPTask* inFlightTask = taskInFlight ? reusableTask : NULL;
+    SPTask* inFlightDependency = NULL;
+    SPTask* pendingTask = NULL;
+    FrameBuffer* pendingFrameBuffer = NULL;
+    u32 currentVi = PspPlatform_GetViCount();
+    u32 simulationTicks;
+    u32 submitFailed;
+    u32 renderOnly;
+
+    PspFrameScheduler_Init(&scheduler, currentVi, gVIsPerFrame, Graphics_GetPresentationVIs());
+    while (true) {
+        PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_VBLANK_WAIT);
+        MQ_WAIT_FOR_MESG(&gGfxVImesgQueue, NULL);
+        PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_VBLANK_WAIT);
+        if (PspProfiler_ExitRequested()) {
+            Graphics_WaitForTask(&taskInFlight);
+            PspPlatform_ExitGame();
+            return;
+        }
+        PspInput_Update();
+        currentVi = PspPlatform_GetViCount();
+        schedule = PspFrameScheduler_Advance(&scheduler, currentVi);
+        simulationTicks = 0;
+        submitFailed = false;
+        renderOnly = false;
+
+        if (schedule.simulationDue) {
+            u32 simulationDeadlineVi;
+            u32 simulationTick;
+
+            if (PspMenu_NeedsBoundary()) {
+                Graphics_WaitForTask(&taskInFlight);
+                inFlightTask = NULL;
+                inFlightDependency = NULL;
+                PspMenu_Apply();
+                currentVi = PspPlatform_GetViCount();
+                PspFrameScheduler_SetPresentationVIs(&scheduler, currentVi, Graphics_GetPresentationVIs());
+            }
+            simulationTicks = MIN(schedule.missedSimulationDeadlines + 1, PSP_MAX_SIMULATION_TICKS_PER_WAKE);
+            simulationDeadlineVi =
+                schedule.simulationDeadlineVi - ((simulationTicks - 1) * scheduler.simulationVIs);
+
+            for (simulationTick = 0; simulationTick < simulationTicks; simulationTick++) {
+                SPTask* nextTask = &gGfxPools[(gSysFrameCount + 1) % 2].task;
+
+                if (taskInFlight && ((nextTask == inFlightTask) || (nextTask == inFlightDependency))) {
+                    Graphics_WaitForTask(&taskInFlight);
+                    inFlightTask = NULL;
+                    inFlightDependency = NULL;
+                }
+                pendingTask = Graphics_BuildSimulationTask(simulationDeadlineVi);
+                pendingFrameBuffer = gFrameBuffer;
+                simulationDeadlineVi += scheduler.simulationVIs;
+                if ((simulationTick + 1) < simulationTicks) {
+                    Graphics_UpdateAudio();
+                }
+            }
+            PspFrameScheduler_SetSimulationVIs(&scheduler, currentVi, gVIsPerFrame);
+            PspFrameScheduler_SetPresentationVIs(&scheduler, currentVi, Graphics_GetPresentationVIs());
+        }
+
+        PspMenu_Publish();
+
+        if (schedule.presentationDue) {
+            SPTask* task;
+
+            Graphics_WaitForTask(&taskInFlight);
+            inFlightTask = NULL;
+            inFlightDependency = NULL;
+            if (pendingTask != NULL) {
+                task = pendingTask;
+            } else {
+                task = reusableTask;
+                renderOnly = true;
+            }
+
+            PspCensus_Prepare(0, renderOnly);
+            inFlightDependency =
+                PspFrameInterpolation_PreparePresentation(task, currentVi, scheduler.presentationVIs);
+            PspCensus_Prepare(1, renderOnly);
+            if (Graphics_SubmitTask(task) == 0) {
+                taskInFlight = true;
+                inFlightTask = task;
+                reusableTask = task;
+                if (pendingTask != NULL) {
+                    reusableFrameBuffer = pendingFrameBuffer;
+                    pendingTask = NULL;
+                    pendingFrameBuffer = NULL;
+                }
+            } else {
+                submitFailed = true;
+                inFlightDependency = NULL;
+            }
+
+            if (!gFillScreen) {
+                osViSwapBuffer(reusableFrameBuffer);
+            }
+            Fault_SetFrameBuffer(reusableFrameBuffer, SCREEN_WIDTH, 16);
+        }
+
+        if (schedule.simulationDue) {
+            Graphics_UpdateAudio();
+        }
+        PspRenderer_RecordSimulationTicks(simulationTicks);
+
+        PspCensus_Event(3, schedule.elapsedVIs, simulationTicks, schedule.presentationDue, renderOnly,
+                        schedule.missedSimulationDeadlines, schedule.missedPresentationDeadlines + submitFailed,
+                        scheduler.simulationVIs, scheduler.presentationVIs);
+        PspProfiler_RecordTimingEvent(schedule.elapsedVIs, simulationTicks, schedule.presentationDue,
+                                      renderOnly, schedule.missedSimulationDeadlines,
+                                      schedule.missedPresentationDeadlines + submitFailed,
+                                      scheduler.simulationVIs, scheduler.presentationVIs);
+    }
+}
+#endif
+
+void Graphics_ThreadEntry(void* arg0) {
+#ifndef TARGET_PSP
+    u8 i;
+    u8 visPerFrame;
+    u8 validVIsPerFrame;
+#else
+    u32 initialVi;
+#endif
+
+    PSP_TRACE("gfx game init");
+    Game_Initialize();
+    PSP_TRACE("gfx game init done");
+    osSendMesg(&gSerialThreadMesgQueue, (OSMesg) SI_READ_CONTROLLER, OS_MESG_NOBLOCK);
+    PSP_TRACE("gfx init task 0");
+    Graphics_InitializeTask(gSysFrameCount);
+#ifdef TARGET_PSP
+    initialVi = PspPlatform_GetViCount();
+    PspFrameInterpolation_BeginSimulationFrame(gGfxTask, initialVi, gVIsPerFrame,
+                                               Graphics_InterpolationEligible());
+#endif
+    {
+        gSPSegment(gUnkDisp1++, 0, 0);
+        gSPDisplayList(gMasterDisp++, gGfxPool->unkDL1);
+        PSP_TRACE("gfx first update");
+        Game_Update();
+#ifdef TARGET_PSP
+        PspFrameInterpolation_EndSimulationFrame(gGfxTask, Graphics_InterpolationEligible());
+#endif
+        PSP_TRACE("gfx first update done");
+        gSPEndDisplayList(gUnkDisp1++);
+        gSPEndDisplayList(gUnkDisp2++);
+        gSPDisplayList(gMasterDisp++, gGfxPool->unkDL2);
+        gDPFullSync(gMasterDisp++);
+        gSPEndDisplayList(gMasterDisp++);
+    }
+    PSP_TRACE("gfx first task");
+#ifdef TARGET_PSP
+    Graphics_PrepareTask();
+    PspFrameInterpolation_PreparePresentation(gGfxTask, initialVi, Graphics_GetPresentationVIs());
+    Graphics_RunPspScheduler(gGfxTask, gFrameBuffer, Graphics_SubmitTask(gGfxTask) == 0);
+#else
+    Graphics_SetTask();
+    PSP_TRACE("gfx loop");
+    while (true) {
+        gSysFrameCount++;
+        if ((gSysFrameCount <= 4) || ((gSysFrameCount % 30) == 0)) {
+            PSP_TRACE_FRAME("loop begin", gSysFrameCount);
+        }
+        Graphics_InitializeTask(gSysFrameCount);
+        MQ_WAIT_FOR_MESG(&gControllerMesgQueue, NULL);
+        if ((gSysFrameCount <= 4) || ((gSysFrameCount % 30) == 0)) {
+            PSP_TRACE_FRAME("controller ready", gSysFrameCount);
+        }
+#ifndef TARGET_PSP
+        osSendMesg(&gSerialThreadMesgQueue, (OSMesg) SI_RUMBLE, OS_MESG_NOBLOCK);
+#endif
+        Controller_UpdateInput();
+        if ((gSysFrameCount <= 4) || ((gSysFrameCount % 30) == 0)) {
+            PSP_TRACE_FRAME("controller update done", gSysFrameCount);
+        }
+        osSendMesg(&gSerialThreadMesgQueue, (OSMesg) SI_READ_CONTROLLER, OS_MESG_NOBLOCK);
+        if ((gSysFrameCount <= 4) || ((gSysFrameCount % 30) == 0)) {
+            PSP_TRACE_FRAME("controller read queued", gSysFrameCount);
+        }
+        if (gControllerPress[3].button & U_JPAD) {
+            Main_SetVIMode();
+        }
+        {
+            gSPSegment(gUnkDisp1++, 0, 0);
+            gSPDisplayList(gMasterDisp++, gGfxPool->unkDL1);
+            if ((gSysFrameCount <= 4) || ((gSysFrameCount % 30) == 0)) {
+                PSP_TRACE_FRAME("game update begin", gSysFrameCount);
+            }
+#ifdef TARGET_PSP
+            PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_GAME_UPDATE);
+#endif
+            Game_Update();
+#ifdef TARGET_PSP
+            PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_GAME_UPDATE);
+#endif
+            if ((gSysFrameCount <= 4) || ((gSysFrameCount % 30) == 0)) {
+                PSP_TRACE_FRAME("game update done", gSysFrameCount);
+            }
+            if (gStartNMI == 1) {
+                Graphics_NMIWipe();
+            }
+            gSPEndDisplayList(gUnkDisp1++);
+            gSPEndDisplayList(gUnkDisp2++);
+            gSPDisplayList(gMasterDisp++, gGfxPool->unkDL2);
+            gDPFullSync(gMasterDisp++);
+            gSPEndDisplayList(gMasterDisp++);
+        }
+#ifdef TARGET_PSP
+        PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_GFX_TASK_BACKPRESSURE);
+#endif
+        MQ_WAIT_FOR_MESG(&gGfxTaskMesgQueue, NULL);
+#ifdef TARGET_PSP
+        PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_GFX_TASK_BACKPRESSURE);
+#endif
+        if ((gSysFrameCount <= 4) || ((gSysFrameCount % 30) == 0)) {
+            PSP_TRACE_FRAME("gfx task ack", gSysFrameCount);
+        }
+
+        Graphics_SetTask();
+        if ((gSysFrameCount <= 4) || ((gSysFrameCount % 30) == 0)) {
+            PSP_TRACE_FRAME("gfx task queued", gSysFrameCount);
+        }
+
+        if (!gFillScreen) {
+            osViSwapBuffer(&gFrameBuffers[(gSysFrameCount - 1) % 3]);
+        }
+
+        Fault_SetFrameBuffer(&gFrameBuffers[(gSysFrameCount - 1) % 3], SCREEN_WIDTH, 16);
+
+        visPerFrame = MIN(gVIsPerFrame, 4);
+        validVIsPerFrame = MAX(visPerFrame, gGfxVImesgQueue.validCount + 1);
+#ifdef TARGET_PSP
+        PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_VBLANK_WAIT);
+#endif
+        for (i = 0; i < validVIsPerFrame; i += 1) { // Can't be ++
+            MQ_WAIT_FOR_MESG(&gGfxVImesgQueue, NULL);
+        }
+#ifdef TARGET_PSP
+        PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_VBLANK_WAIT);
+#endif
+        if ((gSysFrameCount <= 4) || ((gSysFrameCount % 30) == 0)) {
+            PSP_TRACE_FRAME("vi wait done", gSysFrameCount);
+        }
+
+#ifdef TARGET_PSP
+        PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_AUDIO_UPDATE);
+#endif
+        Audio_Update();
+#ifdef TARGET_PSP
+        PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_AUDIO_UPDATE);
+#endif
+    }
+#endif
+}
+
+void Main_InitMesgQueues(void) {
+    osCreateMesgQueue(&gDmaMesgQueue, sDmaMsgBuff, ARRAY_COUNT(sDmaMsgBuff));
+    osCreateMesgQueue(&gTaskMesgQueue, sTaskMsgBuff, ARRAY_COUNT(sTaskMsgBuff));
+    osCreateMesgQueue(&gAudioVImesgQueue, sAudioVImsgBuff, ARRAY_COUNT(sAudioVImsgBuff));
+    osCreateMesgQueue(&gAudioTaskMesgQueue, sAudioTaskMsgBuff, ARRAY_COUNT(sAudioTaskMsgBuff));
+    osCreateMesgQueue(&gGfxVImesgQueue, sGfxVImsgBuff, ARRAY_COUNT(sGfxVImsgBuff));
+    osCreateMesgQueue(&gGfxTaskMesgQueue, sGfxTaskMsgBuff, ARRAY_COUNT(sGfxTaskMsgBuff));
+    osCreateMesgQueue(&gSerialEventQueue, sSerialEventBuff, ARRAY_COUNT(sSerialEventBuff));
+    osSetEventMesg(OS_EVENT_SI, &gSerialEventQueue, NULL);
+    osCreateMesgQueue(&gMainThreadMesgQueue, sMainThreadMsgBuff, ARRAY_COUNT(sMainThreadMsgBuff));
+    osViSetEvent(&gMainThreadMesgQueue, (OSMesg) EVENT_MESG_VI, 1);
+    osSetEventMesg(OS_EVENT_SP, &gMainThreadMesgQueue, (OSMesg) EVENT_MESG_SP);
+    osSetEventMesg(OS_EVENT_DP, &gMainThreadMesgQueue, (OSMesg) EVENT_MESG_DP);
+    osSetEventMesg(OS_EVENT_PRENMI, &gMainThreadMesgQueue, (OSMesg) EVENT_MESG_PRENMI);
+    osCreateMesgQueue(&gTimerTaskMesgQueue, sTimerTaskMsgBuff, ARRAY_COUNT(sTimerTaskMsgBuff));
+    osCreateMesgQueue(&gTimerWaitMesgQueue, sTimerWaitMsgBuff, ARRAY_COUNT(sTimerWaitMsgBuff));
+    osCreateMesgQueue(&gSerialThreadMesgQueue, sSerialThreadMsgBuff, ARRAY_COUNT(sSerialThreadMsgBuff));
+    osCreateMesgQueue(&gControllerMesgQueue, sControllerMsgBuff, ARRAY_COUNT(sControllerMsgBuff));
+    osCreateMesgQueue(&gSaveMesgQueue, sSaveMsgBuff, ARRAY_COUNT(sSaveMsgBuff));
+}
+
+void Main_HandleRDP(void) {
+    SPTask** task = sGfxTasks;
+    u8 i;
+
+    if (*task == NULL) {
+        PSP_TRACE("rdp with no gfx task");
+        return;
+    }
+
+    if ((*task)->mesgQueue != NULL) {
+        osSendMesg((*task)->mesgQueue, (*task)->msg, OS_MESG_NOBLOCK);
+    }
+    (*task)->state = SPTASK_STATE_FINISHED_DP;
+
+    for (i = 0; i < ARRAY_COUNT(sGfxTasks) - 1; i += 1, task++) {
+        *task = *(task + 1);
+    }
+    *task = NULL;
+}
+
+void Main_HandleRSP(void) {
+    SPTask* task = gCurrentTask;
+
+    if (task == NULL) {
+        PSP_TRACE("rsp with no current task");
+        return;
+    }
+
+    gCurrentTask = NULL;
+    if (task->state == SPTASK_STATE_INTERRUPTED) {
+        if (osSpTaskYielded(&task->task) == 0) {
+            task->state = SPTASK_STATE_FINISHED;
+        }
+    } else {
+        task->state = SPTASK_STATE_FINISHED;
+        if (task->task.t.type == M_AUDTASK) {
+            if (task->mesgQueue != NULL) {
+                osSendMesg(task->mesgQueue, task->msg, OS_MESG_NOBLOCK);
+            }
+            sAudioTasks[0] = NULL;
+        }
+    }
+}
+
+static u8 Main_CountActiveTasks(SPTask** tasks, u8 capacity) {
+    u8 i, count = 0;
+    for (i = 0; i < capacity; i++) if (tasks[i] != NULL) count++;
+    return count;
+}
+
+static void Main_RecordPendingTaskMax(void) {
+    unsigned char i, audio = 0, gfx = 0;
+    for (i = 0; i < sPendingTasks.count; i++) {
+        unsigned char index = (sPendingTasks.first + i) % MAIN_TASK_PENDING_CAPACITY;
+        if (sPendingTasks.entries[index].type == MAIN_TASK_PENDING_AUDIO) audio++;
+        else if (sPendingTasks.entries[index].type == MAIN_TASK_PENDING_GFX) gfx++;
+    }
+    if (audio > gTaskPendingAudioMax) gTaskPendingAudioMax = audio;
+    if (gfx > gTaskPendingGfxMax) gTaskPendingGfxMax = gfx;
+}
+
+static void Main_AdmitPendingTasks(void) {
+    MainTaskPendingEntry entry;
+    for (;;) {
+        u8 audioCount, gfxCount;
+        if (!MainTaskPending_Peek(&sPendingTasks, &entry)) return;
+        if (entry.type == MAIN_TASK_PENDING_UNSUPPORTED) {
+            SPTask* task = (SPTask*) entry.task;
+            task->state = SPTASK_STATE_FINISHED;
+            if (task->mesgQueue != NULL && osSendMesg(task->mesgQueue, task->msg, OS_MESG_NOBLOCK) != 0) {
+                gTaskCompletionFailures++;
+                return;
+            }
+            MainTaskPending_Pop(&sPendingTasks, &entry);
+            continue;
+        }
+        audioCount = Main_CountActiveTasks(sAudioTasks, ARRAY_COUNT(sAudioTasks));
+        gfxCount = Main_CountActiveTasks(sGfxTasks, ARRAY_COUNT(sGfxTasks));
+        if (!MainTaskPending_CanAdmit(entry.type, audioCount, ARRAY_COUNT(sAudioTasks),
+                                      gfxCount, ARRAY_COUNT(sGfxTasks))) return;
+        if (entry.type == MAIN_TASK_PENDING_AUDIO) {
+            sAudioTasks[audioCount] = (SPTask*) entry.task;
+        } else {
+            sGfxTasks[gfxCount] = (SPTask*) entry.task;
+        }
+        MainTaskPending_Pop(&sPendingTasks, &entry);
+    }
+}
+
+void Main_GetNewTasks(void) {
+    OSMesg taskMessage;
+    SPTask* task;
+    unsigned char type;
+    u32 drained = 0;
+
+    Main_AdmitPendingTasks();
+    while (sPendingTasks.count < MAIN_TASK_PENDING_CAPACITY) {
+        if (!MQ_GET_MESG(&gTaskMesgQueue, &taskMessage)) break;
+        drained++;
+        if (drained > gTaskQueueMaxDrainBatch) gTaskQueueMaxDrainBatch = drained;
+        task = (SPTask*) taskMessage;
+        if (task == NULL) {
+            gTaskInvalidMessages++;
+            continue;
+        }
+        if (task->task.t.type == M_AUDTASK) type = MAIN_TASK_PENDING_AUDIO;
+        else if (task->task.t.type == M_GFXTASK) type = MAIN_TASK_PENDING_GFX;
+        else {
+            type = MAIN_TASK_PENDING_UNSUPPORTED;
+            gTaskUnsupportedTypes++;
+            task->state = SPTASK_STATE_FINISHED;
+        }
+        if (type != MAIN_TASK_PENDING_UNSUPPORTED) task->state = SPTASK_STATE_NOT_STARTED;
+        MainTaskPending_Push(&sPendingTasks, task, type);
+        Main_RecordPendingTaskMax();
+        Main_AdmitPendingTasks();
+    }
+    if (sPendingTasks.count >= MAIN_TASK_PENDING_CAPACITY) gTaskCapacityPressure++;
+}
+
+void Main_StartNextTask(void) {
+    if (sAudioTasks[0] != NULL) {
+        if (gCurrentTask != NULL) {
+            if (gCurrentTask->task.t.type == M_GFXTASK) {
+                gCurrentTask->state = SPTASK_STATE_INTERRUPTED;
+                osSpTaskYield();
+            }
+        } else {
+            gCurrentTask = sAudioTasks[0];
+            osSpTaskLoad(&gCurrentTask->task);
+            osSpTaskStartGo(&gCurrentTask->task);
+            gCurrentTask->state = SPTASK_STATE_RUNNING;
+        }
+    } else if ((gCurrentTask == NULL) && (sGfxTasks[0] != NULL) && (sGfxTasks[0]->state != SPTASK_STATE_FINISHED)) {
+        gCurrentTask = sGfxTasks[0];
+        osDpSetStatus(DPC_CLR_TMEM_CTR | DPC_CLR_PIPE_CTR | DPC_CLR_CMD_CTR | DPC_CLR_CLOCK_CTR);
+        osSpTaskLoad(&gCurrentTask->task);
+        osSpTaskStartGo(&gCurrentTask->task);
+        gCurrentTask->state = SPTASK_STATE_RUNNING;
+    }
+}
+
+void Main_ThreadEntry(void* arg0) {
+    OSMesg osMesg;
+    u8 mesg;
+
+#ifdef TARGET_PSP
+    // Allow audio synthesis to preempt synchronous rendering
+    osSetThreadPri(NULL, 70);
+    Main_InitMesgQueues();
+#endif
+
+    osCreateThread(&gAudioThread, THREAD_ID_AUDIO, Audio_ThreadEntry, arg0,
+                   gAudioThreadStack + sizeof(gAudioThreadStack), 80);
+    osStartThread(&gAudioThread);
+    osCreateThread(&gGraphicsThread, THREAD_ID_GRAPHICS, Graphics_ThreadEntry, arg0,
+                   gGraphicsThreadStack + sizeof(gGraphicsThreadStack), 40);
+    osStartThread(&gGraphicsThread);
+    osCreateThread(&gTimerThread, THREAD_ID_TIMER, Timer_ThreadEntry, arg0,
+                   gTimerThreadStack + sizeof(gTimerThreadStack), 60);
+    osStartThread(&gTimerThread);
+    osCreateThread(&gSerialThread, THREAD_ID_SERIAL, SerialInterface_ThreadEntry, arg0,
+                   gSerialThreadStack + sizeof(gSerialThreadStack), 20);
+    osStartThread(&gSerialThread);
+
+#ifndef TARGET_PSP
+    Main_InitMesgQueues();
+#endif
+
+    while (true) {
+        MQ_WAIT_FOR_MESG(&gMainThreadMesgQueue, &osMesg);
+        mesg = (u32) osMesg;
+
+        switch (mesg) {
+#if defined(TARGET_PSP) && PSP_GFX_BACKEND_GU
+            case EVENT_MESG_TASK_READY:
+                Main_GetNewTasks();
+                break;
+#endif
+            case EVENT_MESG_VI:
+            #ifdef TARGET_PSP
+                PspPlatform_AcknowledgeViEvent();
+            #endif
+                osSendMesg(&gAudioVImesgQueue, (OSMesg) EVENT_MESG_VI, OS_MESG_NOBLOCK);
+                osSendMesg(&gGfxVImesgQueue, (OSMesg) EVENT_MESG_VI, OS_MESG_NOBLOCK);
+                Main_GetNewTasks();
+                break;
+            case EVENT_MESG_SP:
+                Main_HandleRSP();
+                Main_GetNewTasks();
+                break;
+            case EVENT_MESG_DP:
+                Main_HandleRDP();
+                Main_GetNewTasks();
+                break;
+            case EVENT_MESG_PRENMI:
+                gStartNMI = 1;
+                break;
+        }
+        if (gStopTasks == 0) {
+            Main_StartNextTask();
+        }
+    }
+}
+
+void Idle_ThreadEntry(void* arg0) {
+    osCreateViManager(OS_PRIORITY_VIMGR);
+    Main_SetVIMode();
+    Lib_FillScreen(1);
+    osCreatePiManager(OS_PRIORITY_PIMGR, &gPiMgrCmdQueue, sPiMgrCmdBuff, ARRAY_COUNT(sPiMgrCmdBuff));
+    osCreateThread(&gMainThread, THREAD_ID_MAIN, &Main_ThreadEntry, arg0, sMainThreadStack + sizeof(sMainThreadStack),
+                   100);
+    osStartThread(&gMainThread);
+    Fault_Init();
+    osSetThreadPri(NULL, OS_PRIORITY_IDLE);
+    for (;;) {}
+}
+
+void bootproc(void) {
+    RdRam_CheckIPL3();
+    osInitialize();
+#if MODS_ISVIEWER == 1
+    ISViewer_Init();
+#endif
+    Main_Initialize();
+    osCreateThread(&sIdleThread, THREAD_ID_IDLE, &Idle_ThreadEntry, NULL, sIdleThreadStack + sizeof(sIdleThreadStack),
+                   255);
+    osStartThread(&sIdleThread);
+}
+
+#if MODS_ISVIEWER == 1
+#include "../mods/isviewer.c"
+#endif

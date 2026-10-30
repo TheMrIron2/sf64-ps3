@@ -1,0 +1,3041 @@
+#include <n64psp/display.h>
+
+#include "src/psp/display.h"
+#include "src/psp/gfx/gfx_pspgl.h"
+#include "src/psp/hw_counter_profile.h"
+#include "src/psp/profiler.h"
+#include "macros.h"
+
+#include <GLES/gl.h>
+#include <math.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+
+#ifndef PSP_RENDERER_DIAGNOSTICS
+#define PSP_RENDERER_DIAGNOSTICS 0
+#endif
+
+#ifndef PSP_ORIGINAL_FOG
+#define PSP_ORIGINAL_FOG 0
+#endif
+
+#if PSP_RENDERER_DIAGNOSTICS
+/*
+ * Declared directly (instead of including src/psp/platform.h) because that
+ * header pulls in sf64thread.h -> libultra/ultra64.h, whose PR/os_libc.h
+ * bcmp/bcopy/bzero prototypes conflict with the PSP SDK's own <strings.h>
+ * once <string.h> is in scope, which it already is in this file.
+ */
+void PspPlatform_LogLine(const char* line);
+#endif
+
+#define PSP_GFX_PSPGL_CI8_TEXTURE_CACHE_SIZE 96
+#define PSP_GFX_PSPGL_CONVERTED_TEXTURE_CACHE_SIZE 192
+#define PSP_GFX_PSPGL_CONVERTED_TEXTURE_BUCKET_COUNT 256
+#define PSP_GFX_PSPGL_CONVERTED_TEXTURE_INDEX_NONE 0xFFU
+#define PSP_GFX_PSPGL_GLYPH_ATLAS_WIDTH 256
+#define PSP_GFX_PSPGL_GLYPH_ATLAS_HEIGHT 256
+#define PSP_GFX_PSPGL_GLYPH_ATLAS_SLOT_WIDTH 16
+#define PSP_GFX_PSPGL_GLYPH_ATLAS_SLOT_HEIGHT 16
+#define PSP_GFX_PSPGL_RGBA16_TEXTURE_CACHE_SIZE 128
+#define PSP_GFX_PSPGL_RGBA16_LOOKUP_SET_COUNT 128
+#define PSP_GFX_PSPGL_RGBA32_TEXTURE_CACHE_SIZE 48
+#define PSP_GFX_PSPGL_MAX_TEXTURE_PIXELS (256 * 32 * 4)
+#define PSP_GFX_PSPGL_STAGING_EXCEEDED(pixels, mirror) ((pixels) > PSP_GFX_PSPGL_MAX_TEXTURE_PIXELS)
+#define PSP_GFX_PSPGL_MIN_TEXTURE_DIMENSION 8
+#define PSP_GFX_PSPGL_VERTEX_STREAM_SETS 2
+#define PSP_GFX_PSPGL_REPLAY_CACHE_DRAWS 128
+#define PSP_GFX_PSPGL_REPLAY_CACHE_VERTICES 8192
+
+typedef enum {
+    PSP_GFX_PSPGL_REPLAY_TRIANGLES,
+    PSP_GFX_PSPGL_REPLAY_SPRITES,
+    PSP_GFX_PSPGL_REPLAY_SOLID_RECT,
+    PSP_GFX_PSPGL_REPLAY_FOG,
+} PspGfxPspglReplayType;
+
+typedef struct {
+    PspGfxPspglReplayType type;
+    u32 first;
+    u32 count;
+    u32 textureId;
+    PspGfxPspglTextureRef textureRef;
+    PspGfxPspglTextureEnv textureEnv;
+    u32 textureEnvColor;
+    PspGfxPspglTextureWrap wrapS;
+    PspGfxPspglTextureWrap wrapT;
+    int alphaTest, blend, premultiplied, depthTest, depthWrite, fog, pretransformed, pointFilter;
+    float fogColor[4];
+    float fogStart;
+    float fogEnd;
+    float projection[16];
+    u32 projectionSerial;
+    int uiViewport;
+    int hasFogColor;
+    int hasProjection;
+    float ulx;
+    float uly;
+    float lrx;
+    float lry;
+    u32 color;
+    int blendRect;
+    float scissorUlx;
+    float scissorUly;
+    float scissorLrx;
+    float scissorLry;
+    int scissorEnabled;
+    s16 hudAnchorX;
+    s16 hudAnchorY;
+} PspGfxPspglReplayDraw;
+
+static PspGfxPspglReplayDraw sReplayCacheDraws[PSP_GFX_PSPGL_REPLAY_CACHE_DRAWS];
+static PspGfxPspglColorVertex sReplayCacheVertices[PSP_GFX_PSPGL_REPLAY_CACHE_VERTICES];
+#if PSP_ORIGINAL_FOG
+static PspGfxPspglFogVertex sReplayCacheFogVertices[PSP_GFX_PSPGL_REPLAY_CACHE_VERTICES];
+static u32 sReplayCacheFogVertexCount;
+#endif
+static u32 sReplayCacheDrawCount;
+static u32 sReplayCacheVertexCount;
+static int sReplayCacheCapturing;
+static int sReplayCacheReady;
+static int sReplayCacheCaptureFailed;
+static int sReplayCacheReplaying;
+static int sUiViewportActive = -1;
+static s16 sHudAnchorX;
+static s16 sHudAnchorY;
+static float sScissorUlx;
+static float sScissorUly;
+static float sScissorLrx;
+static float sScissorLry;
+static int sScissorEnabled;
+#define PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_PAGES_PER_SET 256
+#define PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_PAGE_VERTICES 256
+#define PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGES_PER_SET 32
+#define PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_VERTICES 3072
+#define PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_COUNT \
+    (PSP_GFX_PSPGL_VERTEX_STREAM_SETS * PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGES_PER_SET)
+#define PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_PAGE_BYTES \
+    (PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_PAGE_VERTICES * sizeof(PspGfxPspglColorVertex))
+#define PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_BYTES \
+    (PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_VERTICES * sizeof(PspGfxPspglColorVertex))
+#define PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_ARENA_BYTES \
+    (PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_PAGES_PER_SET * PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_PAGE_BYTES)
+#define PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_ARENA_VERTICES \
+    (PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_ARENA_BYTES / sizeof(PspGfxPspglColorVertex))
+#define PSP_GFX_PSPGL_VERTEX_STREAM_SET_BYTES \
+    (PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_ARENA_BYTES + \
+     (PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGES_PER_SET * PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_BYTES))
+#define PSP_GFX_PSPGL_TEXTURE_PARAMETER_FALLBACK_CACHE_SIZE 32
+#define PSP_GFX_PSPGL_N64_WIDTH 320.0f
+#define PSP_GFX_PSPGL_N64_HEIGHT 240.0f
+#define PSP_GFX_PSPGL_GL_SPRITES (GL_POLYGON + 1)
+
+typedef char PspGfxRgba16LookupIndexCheck[
+    (PSP_GFX_PSPGL_RGBA16_TEXTURE_CACHE_SIZE < 256) ? 1 : -1
+];
+typedef char PspGfxRgba16LookupSetCheck[
+    ((PSP_GFX_PSPGL_RGBA16_LOOKUP_SET_COUNT &
+      (PSP_GFX_PSPGL_RGBA16_LOOKUP_SET_COUNT - 1)) == 0) ? 1 : -1
+];
+
+struct PspGfxPspglTextureParameterState {
+    GLuint texture;
+    GLint wrapS;
+    GLint wrapT;
+    GLint minFilter;
+    GLint magFilter;
+    u32 generation;
+    int valid;
+};
+
+typedef struct {
+    const u8* indices;
+    const u16* palette;
+    u32 width;
+    u32 height;
+    u32 uploadWidth;
+    u32 uploadHeight;
+    u8 mirrorS;
+    u8 mirrorT;
+    GLuint texture;
+    PspGfxPspglTextureParameterState parameterState;
+} PspGfxTextureCacheEntry;
+
+typedef struct {
+    const u16* pixels;
+    u32 width;
+    u32 height;
+    u32 uploadWidth;
+    u32 uploadHeight;
+    int premultiplied;
+    u8 mirrorS;
+    u8 mirrorT;
+    GLuint texture;
+    PspGfxPspglTextureParameterState parameterState;
+} PspGfxRgba16TextureCacheEntry;
+
+typedef struct {
+    const void* pixels;
+    u32 width;
+    u32 height;
+    u32 uploadWidth;
+    u32 uploadHeight;
+    int premultiplied;
+    int envBlend;
+    u32 primitiveColor;
+    u32 environmentColor;
+    u8 mirrorS;
+    u8 mirrorT;
+    GLuint texture;
+    PspGfxPspglTextureParameterState parameterState;
+} PspGfxRgba32TextureCacheEntry;
+
+typedef enum {
+    PSP_GFX_CONVERTED_CI4,
+    PSP_GFX_CONVERTED_IA8,
+    PSP_GFX_CONVERTED_IA16,
+    PSP_GFX_CONVERTED_IA8_SOFT_COVERAGE,
+    PSP_GFX_CONVERTED_IA16_SOFT_COVERAGE,
+    PSP_GFX_CONVERTED_FORMAT_COUNT,
+} PspGfxConvertedTextureFormat;
+
+typedef struct {
+    const void* pixels;
+    const u16* palette;
+    u32 width;
+    u32 height;
+    u32 uploadWidth;
+    u32 uploadHeight;
+    u16 uploadX;
+    u16 uploadY;
+    PspGfxConvertedTextureFormat format;
+    int envBlend;
+    u32 primitiveColor;
+    u32 environmentColor;
+    u8 mirrorS;
+    u8 mirrorT;
+    GLuint texture;
+    PspGfxPspglTextureParameterState parameterState;
+    u8 hashNext;
+    u8 atlased;
+} PspGfxConvertedTextureCacheEntry;
+
+typedef char PspGfxConvertedTextureIndexCheck[
+    (PSP_GFX_PSPGL_CONVERTED_TEXTURE_CACHE_SIZE < PSP_GFX_PSPGL_CONVERTED_TEXTURE_INDEX_NONE) ? 1 : -1
+];
+typedef char PspGfxConvertedTextureBucketCheck[
+    ((PSP_GFX_PSPGL_CONVERTED_TEXTURE_BUCKET_COUNT & (PSP_GFX_PSPGL_CONVERTED_TEXTURE_BUCKET_COUNT - 1)) == 0)
+        ? 1
+        : -1
+];
+
+typedef struct {
+    int matrixModeValid;
+    GLenum matrixMode;
+    int projectionValid;
+    int projectionIdentity;
+    u32 projectionSerial;
+    int depthTestValid;
+    int depthTestEnabled;
+    int depthFuncValid;
+    GLenum depthFunc;
+    int depthMaskValid;
+    GLboolean depthMask;
+    int fogValid;
+    int fogEnabled;
+    int fogModeValid;
+    GLfloat fogMode;
+    int fogColorValid;
+    GLfloat fogColor[4];
+    int fogStartValid;
+    GLfloat fogStart;
+    int fogEndValid;
+    GLfloat fogEnd;
+    int texture2DValid;
+    int texture2DEnabled;
+    int alphaTestValid;
+    int alphaTestEnabled;
+    int alphaFuncValid;
+    GLenum alphaFunc;
+    GLfloat alphaRef;
+    int blendValid;
+    int blendEnabled;
+    int blendFuncValid;
+    GLenum blendSrc;
+    GLenum blendDst;
+    int boundTextureValid;
+    GLuint boundTexture;
+    PspGfxPspglTextureRef boundTextureRef;
+    int textureEnvModeValid;
+    GLint textureEnvMode;
+    int textureEnvColorValid;
+    GLfloat textureEnvColor[4];
+} PspGfxPspglStateCache;
+
+typedef struct {
+    GLuint buffer;
+} PspGfxVertexStreamPage;
+
+static PspGfxTextureCacheEntry sTextureCache[PSP_GFX_PSPGL_CI8_TEXTURE_CACHE_SIZE];
+static PspGfxRgba16TextureCacheEntry sRgba16TextureCache[PSP_GFX_PSPGL_RGBA16_TEXTURE_CACHE_SIZE];
+static u8 sRgba16TextureLookup[PSP_GFX_PSPGL_RGBA16_LOOKUP_SET_COUNT][2];
+static PspGfxRgba32TextureCacheEntry sRgba32TextureCache[PSP_GFX_PSPGL_RGBA32_TEXTURE_CACHE_SIZE];
+static PspGfxConvertedTextureCacheEntry sConvertedTextureCache[PSP_GFX_PSPGL_CONVERTED_TEXTURE_CACHE_SIZE];
+static u8 sConvertedTextureBuckets[PSP_GFX_PSPGL_CONVERTED_TEXTURE_BUCKET_COUNT];
+static u8 sConvertedTextureLastHit[PSP_GFX_CONVERTED_FORMAT_COUNT];
+static GLuint sGlyphAtlasTexture;
+static PspGfxPspglTextureParameterState sGlyphAtlasParameterState;
+static PspGfxVertexStreamPage sVertexStreamSmallArenas[PSP_GFX_PSPGL_VERTEX_STREAM_SETS];
+static PspGfxVertexStreamPage sVertexStreamLargePages[PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_COUNT];
+static u8 sTextureUpload[PSP_GFX_PSPGL_MAX_TEXTURE_PIXELS * 4] __attribute__((aligned(16)));
+static u32 sTextureCacheCount;
+static u32 sRgba16TextureCacheCount;
+static u32 sRgba32TextureCacheCount;
+static u32 sTextureCacheReplaceIndex;
+static u32 sRgba16TextureCacheReplaceIndex;
+static u32 sRgba32TextureCacheReplaceIndex;
+static u32 sConvertedTextureCacheCount;
+static u32 sConvertedTextureCacheReplaceIndex;
+static int sConvertedTextureIndexReady;
+static u32 sVertexStreamSetIndex;
+static u32 sVertexStreamSmallArenaVertexIndex;
+static u32 sVertexStreamLargePageIndex;
+static int sVertexStreamInitialized;
+static int sVertexStreamAvailable;
+static u32 sTextureParameterGeneration;
+#if PSP_RENDERER_DIAGNOSTICS
+static u32 sInvalidTextureRefDiagCount;
+#endif
+/*
+ * Resident texture cache entries own the authoritative wrap state for their
+ * PSPGL texture object. The fallback cache only covers unexpected external
+ * texture ids and is invalidated conservatively when a known texture is
+ * deleted so recycled GLuint values cannot inherit stale parameters.
+ */
+static PspGfxPspglTextureParameterState
+    sTextureParameterFallbackCache[PSP_GFX_PSPGL_TEXTURE_PARAMETER_FALLBACK_CACHE_SIZE];
+static void* sVertexStreamSmallArenaMapped;
+static u32 sVertexStreamSmallArenaMappedSet;
+static int sVertexStreamSmallArenaExhausted;
+static PspGfxPspglStateCache sStateCache;
+
+static void psp_gfx_pspgl_invalidate_state_cache(void) {
+    memset(&sStateCache, 0, sizeof(sStateCache));
+}
+
+static PspGfxPspglTextureRef psp_gfx_pspgl_null_texture_ref(void) {
+    PspGfxPspglTextureRef ref;
+
+    ref.state = NULL;
+    ref.texture = 0;
+    ref.generation = 0;
+    return ref;
+}
+
+static PspGfxPspglTextureRef psp_gfx_pspgl_texture_ref(PspGfxPspglTextureParameterState* state) {
+    PspGfxPspglTextureRef ref = psp_gfx_pspgl_null_texture_ref();
+
+    if (state != NULL) {
+        ref.state = state;
+        ref.texture = state->texture;
+        ref.generation = state->generation;
+    }
+    return ref;
+}
+
+static int psp_gfx_pspgl_texture_ref_valid(GLuint texture, const PspGfxPspglTextureRef* ref) {
+    return (ref != NULL) && (ref->state != NULL) && ref->state->valid && (ref->texture == texture) &&
+           (ref->state->texture == texture) && (ref->generation == ref->state->generation);
+}
+
+static void psp_gfx_pspgl_replay_capture_failed(void) {
+    sReplayCacheCaptureFailed = 1;
+    sReplayCacheReady = 0;
+}
+
+static void psp_gfx_pspgl_replay_context(PspGfxPspglReplayDraw* draw) {
+    draw->scissorUlx = sScissorUlx;
+    draw->scissorUly = sScissorUly;
+    draw->scissorLrx = sScissorLrx;
+    draw->scissorLry = sScissorLry;
+    draw->scissorEnabled = sScissorEnabled;
+    draw->hudAnchorX = sHudAnchorX;
+    draw->hudAnchorY = sHudAnchorY;
+}
+
+static void psp_gfx_pspgl_replay_capture_colored(const PspGfxPspglColorVertex* vertices, u32 vertexCount,
+                                                  PspGfxPspglReplayType type, u32 textureId,
+                                                  PspGfxPspglTextureRef textureRef,
+                                                  PspGfxPspglTextureEnv textureEnv, u32 textureEnvColor,
+                                                  PspGfxPspglTextureWrap wrapS, PspGfxPspglTextureWrap wrapT,
+                                                  int alphaTest, int blend, int premultiplied, int depthTest,
+                                                  int depthWrite, int fog, const float* fogColor, float fogStart,
+                                                  float fogEnd, const float* projectionMatrix, u32 projectionSerial,
+                                                  int pretransformed, int pointFilter, int uiViewport) {
+    PspGfxPspglReplayDraw* draw;
+
+    if (!sReplayCacheCapturing || sReplayCacheReplaying) {
+        return;
+    }
+    if ((sReplayCacheDrawCount >= PSP_GFX_PSPGL_REPLAY_CACHE_DRAWS) ||
+        (vertexCount > (PSP_GFX_PSPGL_REPLAY_CACHE_VERTICES - sReplayCacheVertexCount))) {
+        psp_gfx_pspgl_replay_capture_failed();
+        return;
+    }
+    draw = &sReplayCacheDraws[sReplayCacheDrawCount++];
+    memset(draw, 0, sizeof(*draw));
+    draw->type = type;
+    draw->first = sReplayCacheVertexCount;
+    draw->count = vertexCount;
+    draw->textureId = textureId;
+    draw->textureRef = textureRef;
+    draw->textureEnv = textureEnv;
+    draw->textureEnvColor = textureEnvColor;
+    draw->wrapS = wrapS;
+    draw->wrapT = wrapT;
+    draw->alphaTest = alphaTest;
+    draw->blend = blend;
+    draw->premultiplied = premultiplied;
+    draw->depthTest = depthTest;
+    draw->depthWrite = depthWrite;
+    draw->fog = fog;
+    draw->pretransformed = pretransformed;
+    draw->pointFilter = pointFilter;
+    draw->fogStart = fogStart;
+    draw->fogEnd = fogEnd;
+    draw->projectionSerial = projectionSerial;
+    draw->uiViewport = uiViewport;
+    if (fogColor != NULL) {
+        memcpy(draw->fogColor, fogColor, sizeof(draw->fogColor));
+        draw->hasFogColor = 1;
+    }
+    if (projectionMatrix != NULL) {
+        memcpy(draw->projection, projectionMatrix, sizeof(draw->projection));
+        draw->hasProjection = 1;
+    }
+    psp_gfx_pspgl_replay_context(draw);
+    memcpy(&sReplayCacheVertices[sReplayCacheVertexCount], vertices, vertexCount * sizeof(*vertices));
+    sReplayCacheVertexCount += vertexCount;
+}
+
+#if PSP_ORIGINAL_FOG
+static void psp_gfx_pspgl_replay_capture_fog(const PspGfxPspglFogVertex* vertices, u32 vertexCount,
+                                              const float* projectionMatrix, u32 projectionSerial,
+                                              int pretransformed, int depthTest, int uiViewport) {
+    PspGfxPspglReplayDraw* draw;
+
+    if (!sReplayCacheCapturing || sReplayCacheReplaying) {
+        return;
+    }
+    if ((sReplayCacheDrawCount >= PSP_GFX_PSPGL_REPLAY_CACHE_DRAWS) ||
+        (vertexCount > (PSP_GFX_PSPGL_REPLAY_CACHE_VERTICES - sReplayCacheFogVertexCount))) {
+        psp_gfx_pspgl_replay_capture_failed();
+        return;
+    }
+    draw = &sReplayCacheDraws[sReplayCacheDrawCount++];
+    memset(draw, 0, sizeof(*draw));
+    draw->type = PSP_GFX_PSPGL_REPLAY_FOG;
+    draw->first = sReplayCacheFogVertexCount;
+    draw->count = vertexCount;
+    draw->projectionSerial = projectionSerial;
+    draw->pretransformed = pretransformed;
+    draw->depthTest = depthTest;
+    draw->uiViewport = uiViewport;
+    if (projectionMatrix != NULL) {
+        memcpy(draw->projection, projectionMatrix, sizeof(draw->projection));
+        draw->hasProjection = 1;
+    }
+    psp_gfx_pspgl_replay_context(draw);
+    memcpy(&sReplayCacheFogVertices[sReplayCacheFogVertexCount], vertices, vertexCount * sizeof(*vertices));
+    sReplayCacheFogVertexCount += vertexCount;
+}
+#endif
+
+static void psp_gfx_pspgl_replay_capture_solid_rect(float ulx, float uly, float lrx, float lry, u32 color,
+                                                     int blend, int uiViewport) {
+    PspGfxPspglReplayDraw* draw;
+
+    if (!sReplayCacheCapturing || sReplayCacheReplaying) {
+        return;
+    }
+    if (sReplayCacheDrawCount >= PSP_GFX_PSPGL_REPLAY_CACHE_DRAWS) {
+        psp_gfx_pspgl_replay_capture_failed();
+        return;
+    }
+    draw = &sReplayCacheDraws[sReplayCacheDrawCount++];
+    memset(draw, 0, sizeof(*draw));
+    draw->type = PSP_GFX_PSPGL_REPLAY_SOLID_RECT;
+    draw->ulx = ulx;
+    draw->uly = uly;
+    draw->lrx = lrx;
+    draw->lry = lry;
+    draw->color = color;
+    draw->blendRect = blend;
+    draw->uiViewport = uiViewport;
+    psp_gfx_pspgl_replay_context(draw);
+}
+
+static int psp_gfx_pspgl_replay_state_pinned(const PspGfxPspglTextureParameterState* state) {
+    u32 i;
+
+    if (!sReplayCacheReady || (state == NULL)) {
+        return 0;
+    }
+    for (i = 0; i < sReplayCacheDrawCount; i++) {
+        if (sReplayCacheDraws[i].textureRef.state == state) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void psp_gfx_pspgl_expire_replay_texture(const PspGfxPspglTextureParameterState* state) {
+    u32 i;
+
+    for (i = 0; i < sReplayCacheDrawCount; i++) {
+        if (sReplayCacheDraws[i].textureRef.state == state) {
+            sReplayCacheCapturing = 0;
+            sReplayCacheReady = 0;
+            sReplayCacheCaptureFailed = 1;
+            sReplayCacheDrawCount = 0;
+            sReplayCacheVertexCount = 0;
+#if PSP_ORIGINAL_FOG
+            sReplayCacheFogVertexCount = 0;
+#endif
+            return;
+        }
+    }
+}
+
+static int psp_gfx_pspgl_replay_textures_valid(void) {
+    u32 i;
+
+    for (i = 0; i < sReplayCacheDrawCount; i++) {
+        const PspGfxPspglReplayDraw* draw = &sReplayCacheDraws[i];
+
+        if ((draw->textureId != 0) && !psp_gfx_pspgl_texture_ref_valid(draw->textureId, &draw->textureRef)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static PspGfxPspglTextureParameterState*
+psp_gfx_pspgl_note_bound_texture(GLuint texture, PspGfxPspglTextureRef textureRef) {
+    sStateCache.boundTextureValid = 1;
+    sStateCache.boundTexture = texture;
+    if (psp_gfx_pspgl_texture_ref_valid(texture, &textureRef)) {
+        sStateCache.boundTextureRef = textureRef;
+        return textureRef.state;
+    } else {
+        sStateCache.boundTextureRef = psp_gfx_pspgl_null_texture_ref();
+        return NULL;
+    }
+}
+
+static void psp_gfx_pspgl_invalidate_bound_texture(void) {
+    sStateCache.boundTextureValid = 0;
+    sStateCache.boundTextureRef = psp_gfx_pspgl_null_texture_ref();
+}
+
+static void psp_gfx_pspgl_init_texture_parameter_state(PspGfxPspglTextureParameterState* state, GLuint texture) {
+    state->texture = texture;
+    state->wrapS = GL_CLAMP_TO_EDGE;
+    state->wrapT = GL_CLAMP_TO_EDGE;
+    state->minFilter = GL_LINEAR;
+    state->magFilter = GL_LINEAR;
+    state->generation = ++sTextureParameterGeneration;
+    state->valid = 1;
+}
+
+static void psp_gfx_pspgl_invalidate_texture_parameter_state(PspGfxPspglTextureParameterState* state) {
+    psp_gfx_pspgl_expire_replay_texture(state);
+    if (state->valid) {
+        PspProfiler_CountTextureParameterCacheReplacement();
+    }
+    state->texture = 0;
+    state->wrapS = GL_CLAMP_TO_EDGE;
+    state->wrapT = GL_CLAMP_TO_EDGE;
+    state->generation = ++sTextureParameterGeneration;
+    state->valid = 0;
+}
+
+static void psp_gfx_pspgl_invalidate_fallback_texture_parameter_state(GLuint texture) {
+    u32 slot = texture % PSP_GFX_PSPGL_TEXTURE_PARAMETER_FALLBACK_CACHE_SIZE;
+    PspGfxPspglTextureParameterState* state = &sTextureParameterFallbackCache[slot];
+
+    if (state->valid && (state->texture == texture)) {
+        psp_gfx_pspgl_invalidate_texture_parameter_state(state);
+    }
+}
+
+static PspGfxPspglTextureParameterState* psp_gfx_pspgl_record_fallback_texture_parameter_state(GLuint texture,
+                                                                                               GLint wrapS,
+                                                                                               GLint wrapT) {
+    u32 slot = texture % PSP_GFX_PSPGL_TEXTURE_PARAMETER_FALLBACK_CACHE_SIZE;
+    PspGfxPspglTextureParameterState* state = &sTextureParameterFallbackCache[slot];
+
+    if (state->valid && (state->texture != texture)) {
+        PspProfiler_CountTextureParameterCacheReplacement();
+    }
+    state->texture = texture;
+    state->wrapS = wrapS;
+    state->wrapT = wrapT;
+    state->valid = 1;
+    return state;
+}
+
+static void psp_gfx_pspgl_set_texture_wrap(GLuint texture, PspGfxPspglTextureParameterState* state,
+                                           GLint wrapS, GLint wrapT) {
+    u32 fallbackSlot;
+
+    PspProfiler_CountTextureWrapRequest(1, 1);
+    if (state == NULL) {
+        fallbackSlot = texture % PSP_GFX_PSPGL_TEXTURE_PARAMETER_FALLBACK_CACHE_SIZE;
+        state = &sTextureParameterFallbackCache[fallbackSlot];
+        if (!state->valid || (state->texture != texture)) {
+            PspProfiler_CountTextureParameterCacheMiss();
+            PspProfiler_CountTextureWrapCall(1, 1);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapS);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapT);
+            psp_gfx_pspgl_record_fallback_texture_parameter_state(texture, wrapS, wrapT);
+            return;
+        }
+    }
+    if (state->wrapS != wrapS) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapS);
+        state->wrapS = wrapS;
+        PspProfiler_CountTextureWrapCall(1, 0);
+    } else {
+        PspProfiler_CountTextureWrapSkip(1, 0);
+    }
+    if (state->wrapT != wrapT) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapT);
+        state->wrapT = wrapT;
+        PspProfiler_CountTextureWrapCall(0, 1);
+    } else {
+        PspProfiler_CountTextureWrapSkip(0, 1);
+    }
+}
+
+static void psp_gfx_pspgl_set_texture_filter(PspGfxPspglTextureParameterState* state,
+                                             GLint minFilter, GLint magFilter) {
+    if ((state == NULL) || (state->minFilter != minFilter)) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minFilter);
+        if (state != NULL) {
+            state->minFilter = minFilter;
+        }
+    }
+    if ((state == NULL) || (state->magFilter != magFilter)) {
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, magFilter);
+        if (state != NULL) {
+            state->magFilter = magFilter;
+        }
+    }
+}
+
+static int psp_gfx_pspgl_float_equal(GLfloat a, GLfloat b) {
+    return memcmp(&a, &b, sizeof(a)) == 0;
+}
+
+static int psp_gfx_pspgl_float4_equal(const GLfloat* a, const GLfloat* b) {
+    return memcmp(a, b, sizeof(GLfloat) * 4) == 0;
+}
+
+static void psp_gfx_pspgl_matrix_mode(GLenum mode) {
+    if (!sStateCache.matrixModeValid || (sStateCache.matrixMode != mode)) {
+        glMatrixMode(mode);
+        sStateCache.matrixModeValid = 1;
+        sStateCache.matrixMode = mode;
+    }
+}
+
+static void psp_gfx_pspgl_load_projection_identity(void) {
+    psp_gfx_pspgl_matrix_mode(GL_PROJECTION);
+    if (!sStateCache.projectionValid || !sStateCache.projectionIdentity) {
+        glLoadIdentity();
+        sStateCache.projectionValid = 1;
+        sStateCache.projectionIdentity = 1;
+    }
+}
+
+// Compensates for the raw GE depth range so its near clip remains at z 10
+static const GLfloat* psp_gfx_pspgl_depth_projection(const GLfloat* matrix, GLfloat adjusted[16]) {
+    const float nearPlane = 2.0f;
+    const float farPlane = 12800.0f;
+
+    if ((fabsf(matrix[11] + 1.0f) >= 0.0001f) || (fabsf(matrix[15]) >= 0.0001f) ||
+        (fabsf(matrix[10] + 1.0015637f) >= 0.0001f) || (fabsf(matrix[14] + 20.015638f) >= 0.001f)) {
+        return matrix;
+    }
+
+    memcpy(adjusted, matrix, sizeof(GLfloat) * 16);
+    adjusted[10] = (nearPlane + farPlane) / (nearPlane - farPlane);
+    adjusted[14] = (2.0f * nearPlane * farPlane) / (nearPlane - farPlane);
+    return adjusted;
+}
+
+static void psp_gfx_pspgl_load_projection_matrix(const GLfloat* matrix, u32 serial) {
+    GLfloat adjusted[16];
+
+    psp_gfx_pspgl_matrix_mode(GL_PROJECTION);
+    if (!sStateCache.projectionValid || sStateCache.projectionIdentity || (sStateCache.projectionSerial != serial)) {
+        matrix = psp_gfx_pspgl_depth_projection(matrix, adjusted);
+        glLoadMatrixf(matrix);
+        sStateCache.projectionValid = 1;
+        sStateCache.projectionIdentity = 0;
+        sStateCache.projectionSerial = serial;
+    }
+}
+
+static int psp_gfx_pspgl_is_hud_anchor_viewport(int ui) {
+    return ((ui >= PSP_GFX_VIEWPORT_HUD_TOP_LEFT) && (ui <= PSP_GFX_VIEWPORT_HUD_TOP_CENTER)) ||
+           (ui == PSP_GFX_VIEWPORT_HUD_SCALED_TOP_LEFT) || (ui == PSP_GFX_VIEWPORT_HUD_SCALED_BOTTOM_RIGHT);
+}
+
+static void psp_gfx_pspgl_select_viewport(int ui) {
+    const n64psp_display_config* display = PspDisplay_GetConfig();
+    int viewportKey = ui;
+
+    if (ui == PSP_GFX_VIEWPORT_WIDE_UI) {
+        ui = PSP_GFX_VIEWPORT_FULL;
+    }
+    if ((ui == PSP_GFX_VIEWPORT_CENTERED_UI) && (display->mode != N64PSP_DISPLAY_PSP_480X272)) {
+        ui = PSP_GFX_VIEWPORT_FULL;
+    }
+    if (psp_gfx_pspgl_is_hud_anchor_viewport(ui) && !PspDisplay_IsUiScalingEnabled()) {
+        viewportKey += 16;
+    }
+    if (sUiViewportActive == viewportKey) return;
+    if (ui == PSP_GFX_VIEWPORT_NATIVE_HUD) {
+        glViewport(((int) display->framebuffer_width - 320) / 2,
+                   ((int) display->framebuffer_height - 240) / 2, 320, 240);
+    } else if (psp_gfx_pspgl_is_hud_anchor_viewport(ui)) {
+        int scaledWidth = display->ui_viewport_width;
+        int scaledHeight = display->ui_viewport_height;
+        int forceScaled =
+            (ui == PSP_GFX_VIEWPORT_HUD_SCALED_TOP_LEFT) || (ui == PSP_GFX_VIEWPORT_HUD_SCALED_BOTTOM_RIGHT);
+        int width = (PspDisplay_IsUiScalingEnabled() || forceScaled) ? scaledWidth : 320;
+        int height = (PspDisplay_IsUiScalingEnabled() || forceScaled) ? scaledHeight : 240;
+        int left = display->viewport_x;
+        int top = display->viewport_y;
+        int right = display->viewport_x + display->viewport_width;
+        int bottom = display->viewport_y + display->viewport_height;
+        int x = (left + right - width) / 2;
+        int y = top;
+
+        if (display->mode == N64PSP_DISPLAY_PSP_480X272) {
+            left = top = 0;
+            right = display->framebuffer_width;
+            bottom = display->framebuffer_height;
+        }
+        if ((ui == PSP_GFX_VIEWPORT_HUD_TOP_LEFT) || (ui == PSP_GFX_VIEWPORT_HUD_BOTTOM_LEFT) ||
+            (ui == PSP_GFX_VIEWPORT_HUD_SCALED_TOP_LEFT))
+            x = left;
+        if ((ui == PSP_GFX_VIEWPORT_HUD_TOP_RIGHT) || (ui == PSP_GFX_VIEWPORT_HUD_BOTTOM_RIGHT) ||
+            (ui == PSP_GFX_VIEWPORT_HUD_SCALED_BOTTOM_RIGHT))
+            x = right - width;
+        if ((ui == PSP_GFX_VIEWPORT_HUD_BOTTOM_LEFT) || (ui == PSP_GFX_VIEWPORT_HUD_BOTTOM_RIGHT) ||
+            (ui == PSP_GFX_VIEWPORT_HUD_SCALED_BOTTOM_RIGHT))
+            y = bottom - height;
+        if (!PspDisplay_IsUiScalingEnabled() && !forceScaled) {
+            float targetX;
+            float targetY;
+
+            if ((ui == PSP_GFX_VIEWPORT_HUD_TOP_LEFT) || (ui == PSP_GFX_VIEWPORT_HUD_BOTTOM_LEFT)) {
+                targetX = left + sHudAnchorX * ((float) scaledWidth / 320.0f);
+            } else if ((ui == PSP_GFX_VIEWPORT_HUD_TOP_RIGHT) || (ui == PSP_GFX_VIEWPORT_HUD_BOTTOM_RIGHT)) {
+                targetX = right - (320 - sHudAnchorX) * ((float) scaledWidth / 320.0f);
+            } else {
+                targetX = (left + right) * 0.5f + (sHudAnchorX - 160) * ((float) scaledWidth / 320.0f);
+            }
+            if ((ui == PSP_GFX_VIEWPORT_HUD_BOTTOM_LEFT) || (ui == PSP_GFX_VIEWPORT_HUD_BOTTOM_RIGHT)) {
+                targetY = bottom - (240 - sHudAnchorY) * ((float) scaledHeight / 240.0f);
+            } else {
+                targetY = top + sHudAnchorY * ((float) scaledHeight / 240.0f);
+            }
+            x = (int) roundf(targetX) - sHudAnchorX;
+            y = (int) roundf(targetY) - sHudAnchorY;
+        }
+        glViewport(x, (int) display->framebuffer_height - y - height, width, height);
+    } else if (ui == PSP_GFX_VIEWPORT_CENTERED_UI) {
+        glViewport(display->ui_viewport_x, display->ui_viewport_y,
+                   display->ui_viewport_width, display->ui_viewport_height);
+    } else {
+        glViewport(display->viewport_x, display->viewport_y, display->viewport_width, display->viewport_height);
+    }
+    sUiViewportActive = viewportKey;
+}
+
+void PspGfxPspgl_SetHudAnchor(s16 x, s16 y) {
+    if ((sHudAnchorX != x) || (sHudAnchorY != y)) {
+        sHudAnchorX = x;
+        sHudAnchorY = y;
+        sUiViewportActive = -1;
+    }
+}
+
+static void psp_gfx_pspgl_capability(GLenum capability, int enabled, int* valid, int* cached) {
+    if (!*valid || (*cached != enabled)) {
+        if (enabled) {
+            glEnable(capability);
+        } else {
+            glDisable(capability);
+        }
+        *valid = 1;
+        *cached = enabled;
+    }
+}
+
+static void psp_gfx_pspgl_depth_test(int enabled) {
+    psp_gfx_pspgl_capability(GL_DEPTH_TEST, enabled, &sStateCache.depthTestValid, &sStateCache.depthTestEnabled);
+}
+
+static void psp_gfx_pspgl_depth_func(GLenum func) {
+    if (!sStateCache.depthFuncValid || (sStateCache.depthFunc != func)) {
+        glDepthFunc(func);
+        sStateCache.depthFuncValid = 1;
+        sStateCache.depthFunc = func;
+    }
+}
+
+static void psp_gfx_pspgl_depth_mask(GLboolean mask) {
+    if (!sStateCache.depthMaskValid || (sStateCache.depthMask != mask)) {
+        glDepthMask(mask);
+        sStateCache.depthMaskValid = 1;
+        sStateCache.depthMask = mask;
+    }
+}
+
+static void psp_gfx_pspgl_fog_disabled(void) {
+    psp_gfx_pspgl_capability(GL_FOG, 0, &sStateCache.fogValid, &sStateCache.fogEnabled);
+}
+
+static void psp_gfx_pspgl_fog_linear(const GLfloat* color, GLfloat start, GLfloat end) {
+    static const GLfloat mode = GL_LINEAR;
+
+    psp_gfx_pspgl_capability(GL_FOG, 1, &sStateCache.fogValid, &sStateCache.fogEnabled);
+    if (!sStateCache.fogModeValid || !psp_gfx_pspgl_float_equal(sStateCache.fogMode, mode)) {
+        glFogf(GL_FOG_MODE, mode);
+        sStateCache.fogModeValid = 1;
+        sStateCache.fogMode = mode;
+    }
+    if (!sStateCache.fogColorValid || !psp_gfx_pspgl_float4_equal(sStateCache.fogColor, color)) {
+        glFogfv(GL_FOG_COLOR, color);
+        sStateCache.fogColorValid = 1;
+        memcpy(sStateCache.fogColor, color, sizeof(sStateCache.fogColor));
+    }
+    if (!sStateCache.fogStartValid || !psp_gfx_pspgl_float_equal(sStateCache.fogStart, start)) {
+        glFogf(GL_FOG_START, start);
+        sStateCache.fogStartValid = 1;
+        sStateCache.fogStart = start;
+    }
+    if (!sStateCache.fogEndValid || !psp_gfx_pspgl_float_equal(sStateCache.fogEnd, end)) {
+        glFogf(GL_FOG_END, end);
+        sStateCache.fogEndValid = 1;
+        sStateCache.fogEnd = end;
+    }
+}
+
+static void psp_gfx_pspgl_texture_2d(int enabled) {
+    psp_gfx_pspgl_capability(GL_TEXTURE_2D, enabled, &sStateCache.texture2DValid, &sStateCache.texture2DEnabled);
+}
+
+static void psp_gfx_pspgl_alpha_test(int enabled) {
+    psp_gfx_pspgl_capability(GL_ALPHA_TEST, enabled, &sStateCache.alphaTestValid, &sStateCache.alphaTestEnabled);
+}
+
+static void psp_gfx_pspgl_alpha_func(GLenum func, GLfloat ref) {
+    if (!sStateCache.alphaFuncValid || (sStateCache.alphaFunc != func) ||
+        !psp_gfx_pspgl_float_equal(sStateCache.alphaRef, ref)) {
+        glAlphaFunc(func, ref);
+        sStateCache.alphaFuncValid = 1;
+        sStateCache.alphaFunc = func;
+        sStateCache.alphaRef = ref;
+    }
+}
+
+static void psp_gfx_pspgl_blend(int enabled) {
+    psp_gfx_pspgl_capability(GL_BLEND, enabled, &sStateCache.blendValid, &sStateCache.blendEnabled);
+}
+
+static void psp_gfx_pspgl_blend_func(GLenum src, GLenum dst) {
+    if (!sStateCache.blendFuncValid || (sStateCache.blendSrc != src) || (sStateCache.blendDst != dst)) {
+        glBlendFunc(src, dst);
+        sStateCache.blendFuncValid = 1;
+        sStateCache.blendSrc = src;
+        sStateCache.blendDst = dst;
+    }
+}
+
+static PspGfxPspglTextureParameterState*
+psp_gfx_pspgl_bind_texture(GLuint texture, PspGfxPspglTextureRef textureRef) {
+    if (!sStateCache.boundTextureValid || (sStateCache.boundTexture != texture)) {
+        glBindTexture(GL_TEXTURE_2D, texture);
+    }
+    return psp_gfx_pspgl_note_bound_texture(texture, textureRef);
+}
+
+static void psp_gfx_pspgl_texture_env_mode(GLint mode) {
+    if (!sStateCache.textureEnvModeValid || (sStateCache.textureEnvMode != mode)) {
+        glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, mode);
+        sStateCache.textureEnvModeValid = 1;
+        sStateCache.textureEnvMode = mode;
+    }
+}
+
+static void psp_gfx_pspgl_texture_env_color(u32 color) {
+    GLfloat rgba[4];
+
+    rgba[0] = (GLfloat) (color & 0xFFU) / 255.0f;
+    rgba[1] = (GLfloat) ((color >> 8) & 0xFFU) / 255.0f;
+    rgba[2] = (GLfloat) ((color >> 16) & 0xFFU) / 255.0f;
+    rgba[3] = (GLfloat) ((color >> 24) & 0xFFU) / 255.0f;
+
+    if (!sStateCache.textureEnvColorValid || !psp_gfx_pspgl_float4_equal(sStateCache.textureEnvColor, rgba)) {
+        glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, rgba);
+        sStateCache.textureEnvColorValid = 1;
+        memcpy(sStateCache.textureEnvColor, rgba, sizeof(sStateCache.textureEnvColor));
+    }
+}
+
+#if PROFILE_PHASES
+static u64 psp_gfx_pspgl_hash_u64(u64 hash, u64 value) {
+    hash ^= value + 0x9E3779B97F4A7C15ULL + (hash << 6) + (hash >> 2);
+    return hash;
+}
+
+static u64 psp_gfx_pspgl_hash_ptr(u64 hash, const void* ptr) {
+    return psp_gfx_pspgl_hash_u64(hash, (u64) (unsigned long) ptr);
+}
+
+static u64 psp_gfx_pspgl_hash_start(u32 cacheClass) {
+    return psp_gfx_pspgl_hash_u64(0xCBF29CE484222325ULL, cacheClass);
+}
+
+static u64 psp_gfx_pspgl_ci8_key_hash(const u8* indices, const u16* palette, u32 width, u32 height,
+                                      u32 mirrorS, u32 mirrorT) {
+    u64 hash = psp_gfx_pspgl_hash_start(PSP_PROFILE_TEXTURE_CACHE_CI8);
+
+    hash = psp_gfx_pspgl_hash_ptr(hash, indices);
+    hash = psp_gfx_pspgl_hash_ptr(hash, palette);
+    hash = psp_gfx_pspgl_hash_u64(hash, width);
+    hash = psp_gfx_pspgl_hash_u64(hash, height);
+    hash = psp_gfx_pspgl_hash_u64(hash, mirrorS | (mirrorT << 1));
+    return hash;
+}
+
+static u64 psp_gfx_pspgl_ci8_base_hash(const u8* indices) {
+    u64 hash = psp_gfx_pspgl_hash_start(PSP_PROFILE_TEXTURE_CACHE_CI8);
+
+    return psp_gfx_pspgl_hash_ptr(hash, indices);
+}
+
+static u64 psp_gfx_pspgl_rgba16_key_hash(const u16* pixels, u32 width, u32 height, int premultiply,
+                                         u32 mirrorS, u32 mirrorT) {
+    u64 hash = psp_gfx_pspgl_hash_start(PSP_PROFILE_TEXTURE_CACHE_RGBA16);
+
+    hash = psp_gfx_pspgl_hash_ptr(hash, pixels);
+    hash = psp_gfx_pspgl_hash_u64(hash, width);
+    hash = psp_gfx_pspgl_hash_u64(hash, height);
+    hash = psp_gfx_pspgl_hash_u64(hash, premultiply ? 1 : 0);
+    hash = psp_gfx_pspgl_hash_u64(hash, mirrorS | (mirrorT << 1));
+    return hash;
+}
+
+static u64 psp_gfx_pspgl_rgba16_base_hash(const u16* pixels) {
+    u64 hash = psp_gfx_pspgl_hash_start(PSP_PROFILE_TEXTURE_CACHE_RGBA16);
+
+    return psp_gfx_pspgl_hash_ptr(hash, pixels);
+}
+
+static u64 psp_gfx_pspgl_rgba32_key_hash(const void* pixels, u32 width, u32 height, int premultiply, int envBlend,
+                                         u32 primitiveColor, u32 environmentColor, u32 mirrorS, u32 mirrorT) {
+    u64 hash = psp_gfx_pspgl_hash_start(PSP_PROFILE_TEXTURE_CACHE_RGBA32);
+
+    hash = psp_gfx_pspgl_hash_ptr(hash, pixels);
+    hash = psp_gfx_pspgl_hash_u64(hash, width);
+    hash = psp_gfx_pspgl_hash_u64(hash, height);
+    hash = psp_gfx_pspgl_hash_u64(hash, premultiply ? 1 : 0);
+    hash = psp_gfx_pspgl_hash_u64(hash, envBlend ? 1 : 0);
+    hash = psp_gfx_pspgl_hash_u64(hash, primitiveColor);
+    hash = psp_gfx_pspgl_hash_u64(hash, environmentColor);
+    hash = psp_gfx_pspgl_hash_u64(hash, mirrorS | (mirrorT << 1));
+    return hash;
+}
+
+static u64 psp_gfx_pspgl_rgba32_base_hash(const void* pixels) {
+    u64 hash = psp_gfx_pspgl_hash_start(PSP_PROFILE_TEXTURE_CACHE_RGBA32);
+
+    return psp_gfx_pspgl_hash_ptr(hash, pixels);
+}
+
+static u64 psp_gfx_pspgl_converted_key_hash(const void* pixels, const u16* palette, u32 width, u32 height,
+                                            PspGfxConvertedTextureFormat format, int envBlend, u32 primitiveColor,
+                                            u32 environmentColor, u32 mirrorS, u32 mirrorT) {
+    u64 hash = psp_gfx_pspgl_hash_start(PSP_PROFILE_TEXTURE_CACHE_CONVERTED);
+
+    hash = psp_gfx_pspgl_hash_ptr(hash, pixels);
+    hash = psp_gfx_pspgl_hash_ptr(hash, palette);
+    hash = psp_gfx_pspgl_hash_u64(hash, width);
+    hash = psp_gfx_pspgl_hash_u64(hash, height);
+    hash = psp_gfx_pspgl_hash_u64(hash, format);
+    hash = psp_gfx_pspgl_hash_u64(hash, envBlend ? 1 : 0);
+    hash = psp_gfx_pspgl_hash_u64(hash, primitiveColor);
+    hash = psp_gfx_pspgl_hash_u64(hash, environmentColor);
+    hash = psp_gfx_pspgl_hash_u64(hash, mirrorS | (mirrorT << 1));
+    return hash;
+}
+
+static u64 psp_gfx_pspgl_converted_base_hash(const void* pixels, PspGfxConvertedTextureFormat format) {
+    u64 hash = psp_gfx_pspgl_hash_start(PSP_PROFILE_TEXTURE_CACHE_CONVERTED);
+
+    hash = psp_gfx_pspgl_hash_ptr(hash, pixels);
+    hash = psp_gfx_pspgl_hash_u64(hash, format);
+    return hash;
+}
+#endif
+
+/* Decodes to transformed RGB (transfer policy) with raw alpha; also covers
+ * CI4/CI8 palette entries, which route through this conversion. */
+static void psp_gfx_pspgl_rgba16_to_rgba8(u16 color, u8* out) {
+    out[0] = psp_gfx_color_transfer_u8((u8) (((color >> 11) & 0x1F) * 255 / 31));
+    out[1] = psp_gfx_color_transfer_u8((u8) (((color >> 6) & 0x1F) * 255 / 31));
+    out[2] = psp_gfx_color_transfer_u8((u8) (((color >> 1) & 0x1F) * 255 / 31));
+    out[3] = (color & 1) ? 255 : 0;
+}
+
+static u16 psp_gfx_pspgl_read_u16(const void* base, u32 index) {
+    const u8* bytes = (const u8*) base + (index * 2);
+
+    return (u16) bytes[0] | ((u16) bytes[1] << 8);
+}
+
+static u32 psp_gfx_pspgl_converted_texture_bucket(const void* pixels, const u16* palette, u32 width, u32 height,
+                                                  PspGfxConvertedTextureFormat format, int envBlend, u32 primitiveColor,
+                                                  u32 environmentColor) {
+    u32 hash = (u32) (unsigned long) pixels >> 4;
+
+    hash ^= ((u32) (unsigned long) palette >> 4) * 0x9E3779B1U;
+    hash ^= width * 0x85EBCA6BU;
+    hash ^= height * 0xC2B2AE35U;
+    hash ^= (u32) format * 0x27D4EB2DU;
+    hash ^= (u32) envBlend << 29;
+    hash ^= primitiveColor;
+    hash ^= environmentColor * 0x165667B1U;
+    hash ^= hash >> 16;
+    hash *= 0x7FEB352DU;
+    hash ^= hash >> 15;
+    return hash & (PSP_GFX_PSPGL_CONVERTED_TEXTURE_BUCKET_COUNT - 1U);
+}
+
+static void psp_gfx_pspgl_rebuild_converted_texture_index(void) {
+    PspGfxConvertedTextureCacheEntry* entry;
+    u32 bucket;
+    u32 i;
+
+    for (i = 0; i < PSP_GFX_PSPGL_CONVERTED_TEXTURE_BUCKET_COUNT; i++) {
+        sConvertedTextureBuckets[i] = PSP_GFX_PSPGL_CONVERTED_TEXTURE_INDEX_NONE;
+    }
+    for (i = 0; i < PSP_GFX_CONVERTED_FORMAT_COUNT; i++) {
+        sConvertedTextureLastHit[i] = PSP_GFX_PSPGL_CONVERTED_TEXTURE_INDEX_NONE;
+    }
+    for (i = 0; i < sConvertedTextureCacheCount; i++) {
+        entry = &sConvertedTextureCache[i];
+        bucket = psp_gfx_pspgl_converted_texture_bucket(entry->pixels, entry->palette, entry->width, entry->height,
+                                                        entry->format, entry->envBlend, entry->primitiveColor,
+                                                        entry->environmentColor);
+        entry->hashNext = sConvertedTextureBuckets[bucket];
+        sConvertedTextureBuckets[bucket] = (u8) i;
+    }
+    sConvertedTextureIndexReady = 1;
+}
+
+static void psp_gfx_pspgl_ensure_converted_texture_index(void) {
+    if (!sConvertedTextureIndexReady) {
+        psp_gfx_pspgl_rebuild_converted_texture_index();
+    }
+}
+
+static void psp_gfx_pspgl_remove_converted_texture_index(PspGfxConvertedTextureCacheEntry* entry) {
+    u8 index = (u8) (entry - sConvertedTextureCache);
+    u8* link;
+    u32 bucket;
+
+    psp_gfx_pspgl_ensure_converted_texture_index();
+    if (sConvertedTextureLastHit[entry->format] == index) {
+        sConvertedTextureLastHit[entry->format] = PSP_GFX_PSPGL_CONVERTED_TEXTURE_INDEX_NONE;
+    }
+    bucket = psp_gfx_pspgl_converted_texture_bucket(entry->pixels, entry->palette, entry->width, entry->height,
+                                                    entry->format, entry->envBlend, entry->primitiveColor,
+                                                    entry->environmentColor);
+    link = &sConvertedTextureBuckets[bucket];
+    while (*link != PSP_GFX_PSPGL_CONVERTED_TEXTURE_INDEX_NONE) {
+        if (*link == index) {
+            *link = entry->hashNext;
+            entry->hashNext = PSP_GFX_PSPGL_CONVERTED_TEXTURE_INDEX_NONE;
+            return;
+        }
+        link = &sConvertedTextureCache[*link].hashNext;
+    }
+}
+
+static void psp_gfx_pspgl_insert_converted_texture_index(PspGfxConvertedTextureCacheEntry* entry) {
+    u8 index = (u8) (entry - sConvertedTextureCache);
+    u32 bucket;
+
+    psp_gfx_pspgl_ensure_converted_texture_index();
+    bucket = psp_gfx_pspgl_converted_texture_bucket(entry->pixels, entry->palette, entry->width, entry->height,
+                                                    entry->format, entry->envBlend, entry->primitiveColor,
+                                                    entry->environmentColor);
+    entry->hashNext = sConvertedTextureBuckets[bucket];
+    sConvertedTextureBuckets[bucket] = index;
+    sConvertedTextureLastHit[entry->format] = index;
+}
+
+static int psp_gfx_pspgl_converted_texture_uses_glyph_atlas(PspGfxConvertedTextureFormat format, u32 width,
+                                                            u32 height, int envBlend) {
+    return (format == PSP_GFX_CONVERTED_CI4) && (width == PSP_GFX_PSPGL_GLYPH_ATLAS_SLOT_WIDTH) && (height == 13) &&
+           !envBlend;
+}
+
+static void psp_gfx_pspgl_init_glyph_atlas(void) {
+    if (sGlyphAtlasTexture != 0) {
+        return;
+    }
+    glGenTextures(1, &sGlyphAtlasTexture);
+    glBindTexture(GL_TEXTURE_2D, sGlyphAtlasTexture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    psp_gfx_pspgl_init_texture_parameter_state(&sGlyphAtlasParameterState, sGlyphAtlasTexture);
+    psp_gfx_pspgl_note_bound_texture(sGlyphAtlasTexture,
+                                     psp_gfx_pspgl_texture_ref(&sGlyphAtlasParameterState));
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, PSP_GFX_PSPGL_GLYPH_ATLAS_WIDTH,
+                 PSP_GFX_PSPGL_GLYPH_ATLAS_HEIGHT, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+}
+
+/*
+ * RGBA32 texels are stored as native-endian u32 values of the form
+ * 0xRRGGBBAA (the asset .inc.c literals), not as big-endian byte streams.
+ */
+static u32 psp_gfx_pspgl_read_n64_rgba32(const void* base, u32 index) {
+    const u8* bytes = (const u8*) base + (index * 4);
+
+    return ((u32) bytes[3] << 24) | ((u32) bytes[2] << 16) | ((u32) bytes[1] << 8) | (u32) bytes[0];
+}
+
+static int psp_gfx_pspgl_is_dark_rgba16_mask(const u16* pixels, u32 width, u32 height) {
+    u32 pixelCount = width * height;
+    u32 opaqueCount = 0;
+    u32 i;
+
+    for (i = 0; i < pixelCount; i++) {
+        u16 color = psp_gfx_pspgl_read_u16(pixels, i);
+
+        if ((color & 1) == 0) {
+            continue;
+        }
+        opaqueCount++;
+        if (((color >> 11) & 0x1F) > 2 || ((color >> 6) & 0x1F) > 2 || ((color >> 1) & 0x1F) > 2) {
+            return 0;
+        }
+    }
+    return (opaqueCount != 0) && (opaqueCount != pixelCount);
+}
+
+static u8 psp_gfx_pspgl_filtered_rgba16_alpha(const u16* pixels, u32 width, u32 height, u32 x, u32 y) {
+    static const u32 weights[3] = { 1, 2, 1 };
+    u32 alpha = 0;
+    s32 ky;
+    s32 kx;
+
+    for (ky = -1; ky <= 1; ky++) {
+        s32 sampleY = (s32) y + ky;
+
+        if (sampleY < 0) {
+            sampleY = 0;
+        } else if (sampleY >= (s32) height) {
+            sampleY = (s32) height - 1;
+        }
+        for (kx = -1; kx <= 1; kx++) {
+            s32 sampleX = (s32) x + kx;
+            u32 weight = weights[kx + 1] * weights[ky + 1];
+
+            if (sampleX < 0) {
+                sampleX = 0;
+            } else if (sampleX >= (s32) width) {
+                sampleX = (s32) width - 1;
+            }
+            if ((psp_gfx_pspgl_read_u16(pixels, ((u32) sampleY * width) + (u32) sampleX) & 1) != 0) {
+                alpha += 255U * weight;
+            }
+        }
+    }
+    return (u8) ((alpha + 8U) / 16U);
+}
+
+static u32 psp_gfx_pspgl_next_power_of_two(u32 value) {
+    u32 result = PSP_GFX_PSPGL_MIN_TEXTURE_DIMENSION;
+
+    while (result < value) {
+        result <<= 1;
+    }
+    return result;
+}
+
+static int psp_gfx_pspgl_can_mirror_encode(u32 width, u32 height, int mirrorS, int mirrorT) {
+    u32 encodedWidth = psp_gfx_pspgl_next_power_of_two(width) << (mirrorS != 0);
+    u32 encodedHeight = psp_gfx_pspgl_next_power_of_two(height) << (mirrorT != 0);
+
+    return !PSP_GFX_PSPGL_STAGING_EXCEEDED(encodedWidth * encodedHeight, mirrorS || mirrorT);
+}
+
+static u32 psp_gfx_pspgl_encoded_dimension(u32 logicalSize, int mirror) {
+    return psp_gfx_pspgl_next_power_of_two(logicalSize) << (mirror != 0);
+}
+
+static u32 psp_gfx_pspgl_mirror_source_coord(u32 coord, u32 logicalSize, int mirror) {
+    u32 period = psp_gfx_pspgl_next_power_of_two(logicalSize);
+
+    if (mirror && (coord >= period)) {
+        coord = (period * 2U) - 1U - coord;
+    }
+    return (coord < logicalSize) ? coord : (logicalSize - 1U);
+}
+
+#if PROFILE_PHASES
+static void psp_gfx_pspgl_count_mirror_encoding(u32 width, u32 height, u32 encodedWidth, u32 encodedHeight, int mirrorS,
+                                                int mirrorT, int upload, int failure) {
+    u32 sourceWidth = psp_gfx_pspgl_next_power_of_two(width);
+    u32 sourceHeight = psp_gfx_pspgl_next_power_of_two(height);
+
+    PspProfiler_CountMirrorEncodedTexture(mirrorS, mirrorT, sourceWidth * sourceHeight * 4U,
+                                          encodedWidth * encodedHeight * 4U, 1, upload, 0, failure, encodedWidth,
+                                          encodedHeight);
+}
+#else
+#define psp_gfx_pspgl_count_mirror_encoding(width, height, encodedWidth, encodedHeight, mirrorS, mirrorT, upload, \
+                                            failure)                                                              \
+    ((void) 0)
+#endif
+
+static int psp_gfx_pspgl_converted_format_is_ia8(PspGfxConvertedTextureFormat format) {
+    return (format == PSP_GFX_CONVERTED_IA8) || (format == PSP_GFX_CONVERTED_IA8_SOFT_COVERAGE);
+}
+
+static int psp_gfx_pspgl_converted_format_is_ia16(PspGfxConvertedTextureFormat format) {
+    return (format == PSP_GFX_CONVERTED_IA16) || (format == PSP_GFX_CONVERTED_IA16_SOFT_COVERAGE);
+}
+
+static int psp_gfx_pspgl_converted_format_soft_coverage(PspGfxConvertedTextureFormat format) {
+    return (format == PSP_GFX_CONVERTED_IA8_SOFT_COVERAGE) || (format == PSP_GFX_CONVERTED_IA16_SOFT_COVERAGE);
+}
+
+static u8 psp_gfx_pspgl_soft_coverage_alpha(u8 alpha) {
+    if (alpha <= 32U) {
+        return 0;
+    }
+    return (u8) ((((u32) (alpha - 32U) * 255U) + 111U) / 223U);
+}
+
+static const GLvoid* psp_gfx_pspgl_vertex_offset(u32 offset) {
+    return (const GLvoid*) offset;
+}
+
+static void psp_gfx_pspgl_bind_client_arrays(const PspGfxPspglColorVertex* vertices) {
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glTexCoordPointer(2, GL_FLOAT, sizeof(PspGfxPspglColorVertex), &vertices[0].u);
+    glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(PspGfxPspglColorVertex), &vertices[0].color);
+    glVertexPointer(3, GL_FLOAT, sizeof(PspGfxPspglColorVertex), &vertices[0].x);
+}
+
+static void psp_gfx_pspgl_bind_vbo_arrays(GLuint buffer) {
+    glBindBuffer(GL_ARRAY_BUFFER, buffer);
+    glTexCoordPointer(2, GL_FLOAT, sizeof(PspGfxPspglColorVertex),
+                      psp_gfx_pspgl_vertex_offset(offsetof(PspGfxPspglColorVertex, u)));
+    glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(PspGfxPspglColorVertex),
+                   psp_gfx_pspgl_vertex_offset(offsetof(PspGfxPspglColorVertex, color)));
+    glVertexPointer(3, GL_FLOAT, sizeof(PspGfxPspglColorVertex),
+                    psp_gfx_pspgl_vertex_offset(offsetof(PspGfxPspglColorVertex, x)));
+}
+
+static void psp_gfx_pspgl_bind_fog_arrays(const PspGfxPspglFogVertex* vertices) {
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(PspGfxPspglFogVertex), &vertices[0].color);
+    glVertexPointer(3, GL_FLOAT, sizeof(PspGfxPspglFogVertex), &vertices[0].x);
+}
+
+static void psp_gfx_pspgl_unmap_small_arena(void) {
+    if (sVertexStreamSmallArenaMapped == NULL) {
+        return;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, sVertexStreamSmallArenas[sVertexStreamSmallArenaMappedSet].buffer);
+    glUnmapBuffer(GL_ARRAY_BUFFER);
+    sVertexStreamSmallArenaMapped = NULL;
+}
+
+static void psp_gfx_pspgl_init_vertex_stream(void) {
+    u32 i;
+
+    if (sVertexStreamInitialized) {
+        return;
+    }
+    sVertexStreamInitialized = 1;
+    sVertexStreamAvailable = 1;
+    glGenBuffers(PSP_GFX_PSPGL_VERTEX_STREAM_SETS, &sVertexStreamSmallArenas[0].buffer);
+    for (i = 0; i < PSP_GFX_PSPGL_VERTEX_STREAM_SETS; i++) {
+        if (sVertexStreamSmallArenas[i].buffer == 0) {
+            sVertexStreamAvailable = 0;
+            break;
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, sVertexStreamSmallArenas[i].buffer);
+        glBufferData(GL_ARRAY_BUFFER, PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_ARENA_BYTES, NULL, GL_DYNAMIC_DRAW);
+    }
+    glGenBuffers(PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_COUNT, &sVertexStreamLargePages[0].buffer);
+    for (i = 0; i < PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_COUNT; i++) {
+        if (sVertexStreamLargePages[i].buffer == 0) {
+            sVertexStreamAvailable = 0;
+            break;
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, sVertexStreamLargePages[i].buffer);
+        glBufferData(GL_ARRAY_BUFFER, PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_BYTES, NULL, GL_DYNAMIC_DRAW);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    if (!sVertexStreamAvailable) {
+        for (i = 0; i < PSP_GFX_PSPGL_VERTEX_STREAM_SETS; i++) {
+            if (sVertexStreamSmallArenas[i].buffer != 0) {
+                glDeleteBuffers(1, &sVertexStreamSmallArenas[i].buffer);
+                sVertexStreamSmallArenas[i].buffer = 0;
+            }
+        }
+        for (i = 0; i < PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_COUNT; i++) {
+            if (sVertexStreamLargePages[i].buffer != 0) {
+                glDeleteBuffers(1, &sVertexStreamLargePages[i].buffer);
+                sVertexStreamLargePages[i].buffer = 0;
+            }
+        }
+    }
+}
+
+static void psp_gfx_pspgl_reset_vertex_stream(void) {
+    if (!sVertexStreamAvailable) {
+        return;
+    }
+    psp_gfx_pspgl_unmap_small_arena();
+    sVertexStreamSetIndex = (sVertexStreamSetIndex + 1) % PSP_GFX_PSPGL_VERTEX_STREAM_SETS;
+    sVertexStreamSmallArenaVertexIndex = 0;
+    sVertexStreamLargePageIndex = 0;
+    sVertexStreamSmallArenaExhausted = 0;
+}
+
+static int psp_gfx_pspgl_find_converted_texture(const void* pixels, const u16* palette, u32 width, u32 height,
+                                                PspGfxConvertedTextureFormat format, u32* textureId,
+                                                PspGfxPspglTextureRef* textureRef, u32* uploadWidth, u32* uploadHeight,
+                                                u32* uploadX, u32* uploadY, int envBlend, u32 primitiveColor,
+                                                u32 environmentColor, int mirrorS, int mirrorT, int countHit) {
+    PspGfxConvertedTextureCacheEntry* entry;
+#if PROFILE_PHASES
+    u64 keyHash;
+    u64 baseHash;
+#endif
+    u32 bucket;
+    u8 index;
+
+    if ((pixels == NULL) || (width == 0) || (height == 0) || (textureId == NULL) || (textureRef == NULL) ||
+        (uploadWidth == NULL) || (uploadHeight == NULL) || ((format == PSP_GFX_CONVERTED_CI4) && (palette == NULL))) {
+        return 0;
+    }
+    if (envBlend) {
+        primitiveColor &= 0x00FFFFFFU;
+        environmentColor &= 0x00FFFFFFU;
+    }
+#if PROFILE_PHASES
+    keyHash = psp_gfx_pspgl_converted_key_hash(pixels, palette, width, height, format, envBlend, primitiveColor,
+                                               environmentColor, mirrorS, mirrorT);
+    baseHash = psp_gfx_pspgl_converted_base_hash(pixels, format);
+#endif
+    psp_gfx_pspgl_ensure_converted_texture_index();
+    index = sConvertedTextureLastHit[format];
+    if (index != PSP_GFX_PSPGL_CONVERTED_TEXTURE_INDEX_NONE) {
+        entry = &sConvertedTextureCache[index];
+        if ((entry->pixels == pixels) && (entry->palette == palette) && (entry->width == width) &&
+            (entry->height == height) && (entry->format == format) && (entry->envBlend == envBlend) &&
+            (entry->primitiveColor == primitiveColor) && (entry->environmentColor == environmentColor) &&
+            (entry->mirrorS == mirrorS) && (entry->mirrorT == mirrorT)) {
+            goto found;
+        }
+    }
+    bucket = psp_gfx_pspgl_converted_texture_bucket(pixels, palette, width, height, format, envBlend, primitiveColor,
+                                                    environmentColor);
+    index = sConvertedTextureBuckets[bucket];
+    while (index != PSP_GFX_PSPGL_CONVERTED_TEXTURE_INDEX_NONE) {
+        entry = &sConvertedTextureCache[index];
+        if ((entry->pixels == pixels) && (entry->palette == palette) && (entry->width == width) &&
+            (entry->height == height) && (entry->format == format) && (entry->envBlend == envBlend) &&
+            (entry->primitiveColor == primitiveColor) && (entry->environmentColor == environmentColor) &&
+            (entry->mirrorS == mirrorS) && (entry->mirrorT == mirrorT)) {
+            sConvertedTextureLastHit[format] = index;
+            goto found;
+        }
+        index = entry->hashNext;
+    }
+#if PROFILE_PHASES
+    PspProfiler_RecordTextureCacheLookup(PSP_PROFILE_TEXTURE_CACHE_CONVERTED,
+                                         PSP_GFX_PSPGL_CONVERTED_TEXTURE_CACHE_SIZE, sConvertedTextureCacheCount,
+                                         keyHash, baseHash, 0);
+#endif
+    return 0;
+
+found:
+    *textureId = entry->texture;
+    *textureRef = entry->atlased ? psp_gfx_pspgl_texture_ref(&sGlyphAtlasParameterState)
+                                 : psp_gfx_pspgl_texture_ref(&entry->parameterState);
+    *uploadWidth = entry->uploadWidth;
+    *uploadHeight = entry->uploadHeight;
+    if (uploadX != NULL) {
+        *uploadX = entry->uploadX;
+    }
+    if (uploadY != NULL) {
+        *uploadY = entry->uploadY;
+    }
+#if PROFILE_PHASES
+    PspProfiler_RecordTextureCacheLookup(PSP_PROFILE_TEXTURE_CACHE_CONVERTED,
+                                         PSP_GFX_PSPGL_CONVERTED_TEXTURE_CACHE_SIZE, sConvertedTextureCacheCount,
+                                         keyHash, baseHash, 1);
+#endif
+    if (countHit) {
+        PspProfiler_CountTextureEvent(1, 0, 0, 0, 0);
+    }
+    return 1;
+}
+
+static u32 psp_gfx_pspgl_create_converted_texture(const void* pixels, const u16* palette, u32 width, u32 height,
+                                                  PspGfxConvertedTextureFormat format, int envBlend, u32 primitiveColor,
+                                                  u32 environmentColor, u32* uploadWidth, u32* uploadHeight,
+                                                  u32* uploadX, u32* uploadY, PspGfxPspglTextureRef* textureRef,
+                                                  int mirrorS, int mirrorT) {
+    PspGfxConvertedTextureCacheEntry* entry;
+    u32 entryIndex;
+    u32 finalWidth;
+    u32 finalHeight;
+    u32 finalPixelCount;
+    int atlased;
+#if PROFILE_PHASES
+    u64 keyHash;
+    u64 baseHash;
+#endif
+    u32 x;
+    u32 y;
+    u32 i;
+
+    if ((pixels == NULL) || (width == 0) || (height == 0) || (uploadWidth == NULL) || (uploadHeight == NULL) ||
+        (textureRef == NULL) || ((format == PSP_GFX_CONVERTED_CI4) && (palette == NULL))) {
+        return 0;
+    }
+    if (envBlend) {
+        primitiveColor &= 0x00FFFFFFU;
+        environmentColor &= 0x00FFFFFFU;
+    }
+    psp_gfx_pspgl_ensure_converted_texture_index();
+    finalWidth = psp_gfx_pspgl_encoded_dimension(width, mirrorS);
+    finalHeight = psp_gfx_pspgl_encoded_dimension(height, mirrorT);
+    finalPixelCount = finalWidth * finalHeight;
+    atlased = !mirrorS && !mirrorT && psp_gfx_pspgl_converted_texture_uses_glyph_atlas(format, width, height, envBlend);
+    if (PSP_GFX_PSPGL_STAGING_EXCEEDED(finalPixelCount, mirrorS || mirrorT)) {
+        psp_gfx_pspgl_count_mirror_encoding(width, height, finalWidth, finalHeight, mirrorS, mirrorT, 0, 1);
+        return 0;
+    }
+#if PROFILE_PHASES
+    keyHash = psp_gfx_pspgl_converted_key_hash(pixels, palette, width, height, format, envBlend, primitiveColor,
+                                               environmentColor, mirrorS, mirrorT);
+    baseHash = psp_gfx_pspgl_converted_base_hash(pixels, format);
+#endif
+    PspProfiler_CountTextureEvent(0, 1, 0, 0, 0);
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_TEXTURE_DECODE);
+    for (y = 0; y < finalHeight; y++) {
+        u32 srcY = psp_gfx_pspgl_mirror_source_coord(y, height, mirrorT);
+
+        for (x = 0; x < finalWidth; x++) {
+            u32 srcX = psp_gfx_pspgl_mirror_source_coord(x, width, mirrorS);
+            u32 srcIndex = (srcY * width) + srcX;
+            u32 dstIndex = (y * finalWidth) + x;
+            u8* out = &sTextureUpload[dstIndex * 4];
+
+            if (format == PSP_GFX_CONVERTED_CI4) {
+                const u8* indices = (const u8*) pixels;
+                u8 packed = indices[srcIndex >> 1];
+                u8 index = (srcIndex & 1) ? (packed & 0xF) : (packed >> 4);
+
+                psp_gfx_pspgl_rgba16_to_rgba8(psp_gfx_pspgl_read_u16(palette, index), out);
+            } else if (psp_gfx_pspgl_converted_format_is_ia8(format)) {
+                u8 packed = ((const u8*) pixels)[srcIndex];
+                u8 intensity = psp_gfx_color_transfer_u8((packed >> 4) * 17);
+                u8 alpha = (packed & 0xF) * 17;
+
+                if (psp_gfx_pspgl_converted_format_soft_coverage(format)) {
+                    alpha = psp_gfx_pspgl_soft_coverage_alpha(alpha);
+                }
+                if (envBlend) {
+                    u8 pr = (u8) (primitiveColor & 0xFFU);
+                    u8 pg = (u8) ((primitiveColor >> 8) & 0xFFU);
+                    u8 pb = (u8) ((primitiveColor >> 16) & 0xFFU);
+                    u8 er = (u8) (environmentColor & 0xFFU);
+                    u8 eg = (u8) ((environmentColor >> 8) & 0xFFU);
+                    u8 eb = (u8) ((environmentColor >> 16) & 0xFFU);
+
+                    out[0] = (u8) (((u32) er * (255U - intensity) + ((u32) pr * intensity) + 127U) / 255U);
+                    out[1] = (u8) (((u32) eg * (255U - intensity) + ((u32) pg * intensity) + 127U) / 255U);
+                    out[2] = (u8) (((u32) eb * (255U - intensity) + ((u32) pb * intensity) + 127U) / 255U);
+                    out[3] = alpha;
+                } else {
+                    out[0] = intensity;
+                    out[1] = intensity;
+                    out[2] = intensity;
+                    out[3] = alpha;
+                }
+            } else if (psp_gfx_pspgl_converted_format_is_ia16(format)) {
+                u16 packed = psp_gfx_pspgl_read_u16(pixels, srcIndex);
+                u8 intensity = psp_gfx_color_transfer_u8((u8) (packed >> 8));
+                u8 alpha = (u8) packed;
+
+                if (psp_gfx_pspgl_converted_format_soft_coverage(format)) {
+                    alpha = psp_gfx_pspgl_soft_coverage_alpha(alpha);
+                }
+                out[0] = intensity;
+                out[1] = intensity;
+                out[2] = intensity;
+                out[3] = alpha;
+            } else {
+                out[0] = 0;
+                out[1] = 0;
+                out[2] = 0;
+                out[3] = 0;
+            }
+        }
+    }
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_TEXTURE_DECODE);
+
+    if (sConvertedTextureCacheCount < PSP_GFX_PSPGL_CONVERTED_TEXTURE_CACHE_SIZE) {
+        entry = &sConvertedTextureCache[sConvertedTextureCacheCount++];
+    } else {
+        entry = NULL;
+        for (i = 0; i < PSP_GFX_PSPGL_CONVERTED_TEXTURE_CACHE_SIZE; i++) {
+            u32 candidate = (sConvertedTextureCacheReplaceIndex + i) % PSP_GFX_PSPGL_CONVERTED_TEXTURE_CACHE_SIZE;
+            PspGfxConvertedTextureCacheEntry* candidateEntry = &sConvertedTextureCache[candidate];
+            const PspGfxPspglTextureParameterState* candidateState = candidateEntry->atlased
+                ? &sGlyphAtlasParameterState : &candidateEntry->parameterState;
+
+            if (!psp_gfx_pspgl_replay_state_pinned(candidateState)) {
+                entry = candidateEntry;
+                sConvertedTextureCacheReplaceIndex = (candidate + 1) % PSP_GFX_PSPGL_CONVERTED_TEXTURE_CACHE_SIZE;
+                break;
+            }
+        }
+        if (entry == NULL) {
+            return 0;
+        }
+        PspHwCounterProfile_CountTextureCacheEviction(PSP_HW_TEXTURE_CACHE_CONVERTED);
+#if PROFILE_PHASES
+        PspProfiler_RecordTextureCacheEviction(
+            PSP_PROFILE_TEXTURE_CACHE_CONVERTED,
+            psp_gfx_pspgl_converted_key_hash(entry->pixels, entry->palette, entry->width, entry->height,
+                                             entry->format, entry->envBlend, entry->primitiveColor,
+                                             entry->environmentColor, entry->mirrorS, entry->mirrorT));
+#endif
+        psp_gfx_pspgl_remove_converted_texture_index(entry);
+        if (entry->atlased) {
+            psp_gfx_pspgl_expire_replay_texture(&sGlyphAtlasParameterState);
+        } else {
+            psp_gfx_pspgl_invalidate_bound_texture();
+            psp_gfx_pspgl_invalidate_fallback_texture_parameter_state(entry->texture);
+            psp_gfx_pspgl_invalidate_texture_parameter_state(&entry->parameterState);
+            glDeleteTextures(1, &entry->texture);
+        }
+    }
+    entryIndex = (u32) (entry - sConvertedTextureCache);
+    entry->pixels = pixels;
+    entry->palette = palette;
+    entry->width = width;
+    entry->height = height;
+    entry->mirrorS = mirrorS;
+    entry->mirrorT = mirrorT;
+    entry->uploadWidth = atlased ? PSP_GFX_PSPGL_GLYPH_ATLAS_WIDTH : finalWidth;
+    entry->uploadHeight = atlased ? PSP_GFX_PSPGL_GLYPH_ATLAS_HEIGHT : finalHeight;
+    entry->uploadX = atlased ? (u16) ((entryIndex & 15U) * PSP_GFX_PSPGL_GLYPH_ATLAS_SLOT_WIDTH) : 0;
+    entry->uploadY = atlased ? (u16) ((entryIndex >> 4) * PSP_GFX_PSPGL_GLYPH_ATLAS_SLOT_HEIGHT) : 0;
+    entry->format = format;
+    entry->envBlend = envBlend;
+    entry->primitiveColor = primitiveColor;
+    entry->environmentColor = environmentColor;
+    entry->atlased = atlased;
+#if PROFILE_PHASES
+    PspProfiler_RecordTextureCacheInsertion(PSP_PROFILE_TEXTURE_CACHE_CONVERTED,
+                                            PSP_GFX_PSPGL_CONVERTED_TEXTURE_CACHE_SIZE, sConvertedTextureCacheCount,
+                                            keyHash, baseHash);
+#endif
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_TEXTURE_UPLOAD);
+    if (atlased) {
+        psp_gfx_pspgl_init_glyph_atlas();
+        entry->texture = sGlyphAtlasTexture;
+        *textureRef = psp_gfx_pspgl_texture_ref(&sGlyphAtlasParameterState);
+        glBindTexture(GL_TEXTURE_2D, entry->texture);
+        psp_gfx_pspgl_note_bound_texture(entry->texture, *textureRef);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, entry->uploadX, entry->uploadY, finalWidth, finalHeight, GL_RGBA,
+                        GL_UNSIGNED_BYTE, sTextureUpload);
+    } else {
+        glGenTextures(1, &entry->texture);
+        glBindTexture(GL_TEXTURE_2D, entry->texture);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        psp_gfx_pspgl_init_texture_parameter_state(&entry->parameterState, entry->texture);
+        *textureRef = psp_gfx_pspgl_texture_ref(&entry->parameterState);
+        psp_gfx_pspgl_note_bound_texture(entry->texture, *textureRef);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, finalWidth, finalHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE,
+                     sTextureUpload);
+    }
+    psp_gfx_pspgl_insert_converted_texture_index(entry);
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_TEXTURE_UPLOAD);
+    PspProfiler_CountTextureEvent(0, 0, 1, 1, finalPixelCount * 4);
+    psp_gfx_pspgl_count_mirror_encoding(width, height, finalWidth, finalHeight, mirrorS, mirrorT, 1, 0);
+    *uploadWidth = entry->uploadWidth;
+    *uploadHeight = entry->uploadHeight;
+    if (uploadX != NULL) {
+        *uploadX = entry->uploadX;
+    }
+    if (uploadY != NULL) {
+        *uploadY = entry->uploadY;
+    }
+    return entry->texture;
+}
+
+void PspGfxPspgl_Init(void) {
+    const n64psp_display_config* display = PspDisplay_GetConfig();
+
+    PspGfxColor_Init();
+    psp_gfx_pspgl_invalidate_state_cache();
+    glViewport(display->viewport_x, display->viewport_y, display->viewport_width, display->viewport_height);
+    glDepthRangeRaw(-163939.984375f, 163939.984375f, 0, 65535);
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_CULL_FACE);
+    glDisable(GL_BLEND);
+    glShadeModel(GL_SMOOTH);
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
+    glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glEnableClientState(GL_COLOR_ARRAY);
+    glEnableClientState(GL_VERTEX_ARRAY);
+    psp_gfx_pspgl_init_vertex_stream();
+    psp_gfx_pspgl_invalidate_state_cache();
+}
+
+void PspGfxPspgl_SetScissor(float ulx, float uly, float lrx, float lry) {
+    const n64psp_display_config* display = PspDisplay_GetConfig();
+    float scaleX = (float) display->viewport_width / PSP_GFX_PSPGL_N64_WIDTH;
+    float scaleY = (float) display->viewport_height / PSP_GFX_PSPGL_N64_HEIGHT;
+    GLint x0;
+    GLint y0Top;
+    GLint x1;
+    GLint y1Bottom;
+
+    if ((ulx == SCREEN_MARGIN) && (uly == SCREEN_MARGIN) &&
+        (lrx == SCREEN_WIDTH - SCREEN_MARGIN) && (lry == SCREEN_HEIGHT - SCREEN_MARGIN)) {
+        ulx = uly = 0.0f;
+        lrx = PSP_GFX_PSPGL_N64_WIDTH;
+        lry = PSP_GFX_PSPGL_N64_HEIGHT;
+    }
+
+    if (ulx < 0.0f) ulx = 0.0f;
+    if (uly < 0.0f) uly = 0.0f;
+    if (lrx > PSP_GFX_PSPGL_N64_WIDTH) lrx = PSP_GFX_PSPGL_N64_WIDTH;
+    if (lry > PSP_GFX_PSPGL_N64_HEIGHT) lry = PSP_GFX_PSPGL_N64_HEIGHT;
+    if ((lrx <= ulx) || (lry <= uly)) return;
+    sScissorUlx = ulx;
+    sScissorUly = uly;
+    sScissorLrx = lrx;
+    sScissorLry = lry;
+    sScissorEnabled = 1;
+    x0 = display->viewport_x + (GLint) (ulx * scaleX);
+    y0Top = (GLint) (uly * scaleY);
+    x1 = display->viewport_x + (GLint) ((lrx * scaleX) + 0.5f);
+    y1Bottom = (GLint) ((lry * scaleY) + 0.5f);
+    glScissor(x0, display->viewport_y + display->viewport_height - y1Bottom,
+              x1 - x0, y1Bottom - y0Top);
+    glEnable(GL_SCISSOR_TEST);
+}
+
+void PspGfxPspgl_ClearScissor(void) {
+    sScissorEnabled = 0;
+    glDisable(GL_SCISSOR_TEST);
+}
+
+static void psp_gfx_pspgl_clear_display_borders(const n64psp_display_config* display) {
+    const GLint x = display->viewport_x;
+    const GLint y = display->viewport_y;
+    const GLint width = display->viewport_width;
+    const GLint height = display->viewport_height;
+    const GLint right = x + width;
+    const GLint top = y + height;
+
+    if (width == display->framebuffer_width && height == display->framebuffer_height) {
+        return;
+    }
+
+    glEnable(GL_SCISSOR_TEST);
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    if (x > 0) {
+        glScissor(0, 0, x, display->framebuffer_height);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+    if (right < display->framebuffer_width) {
+        glScissor(right, 0, display->framebuffer_width - right, display->framebuffer_height);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+    if (y > 0) {
+        glScissor(x, 0, width, y);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+    if (top < display->framebuffer_height) {
+        glScissor(x, top, width, display->framebuffer_height - top);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+}
+
+void PspGfxPspgl_BeginFrame(void) {
+    const n64psp_display_config* display = PspDisplay_GetConfig();
+
+    psp_gfx_pspgl_clear_display_borders(display);
+    glViewport(display->viewport_x, display->viewport_y, display->viewport_width, display->viewport_height);
+    sUiViewportActive = 0;
+    PspGfxPspgl_ClearScissor();
+
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glDisable(GL_TEXTURE_2D);
+    glDisable(GL_BLEND);
+
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
+    psp_gfx_pspgl_reset_vertex_stream();
+    glClear(GL_DEPTH_BUFFER_BIT);
+    glDepthMask(GL_FALSE);
+    psp_gfx_pspgl_invalidate_state_cache();
+    psp_gfx_pspgl_invalidate_state_cache();
+}
+
+void PspGfxPspgl_Flush(void) {
+    /*
+     * PSPGL records state and draws in order, copies client-array vertices
+     * before glDrawArrays returns, and submits internally when its GE list
+     * fills. Keep explicit submission at the frame/task boundary.
+     */
+    psp_gfx_pspgl_unmap_small_arena();
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_GL_FLUSH);
+    glFlush();
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_GL_FLUSH);
+    PspProfiler_CountGlFlush();
+}
+
+static int psp_gfx_pspgl_find_ci8_texture(const u8* indices, const u16* palette, u32 width, u32 height, u32* textureId,
+                                          PspGfxPspglTextureRef* textureRef, u32* uploadWidth, u32* uploadHeight,
+                                          int mirrorS, int mirrorT) {
+    PspGfxTextureCacheEntry* entry;
+#if PROFILE_PHASES
+    u64 keyHash;
+    u64 baseHash;
+#endif
+    u32 i;
+
+    if ((indices == NULL) || (palette == NULL) || (width == 0) || (height == 0) || (textureId == NULL) ||
+        (textureRef == NULL) || (uploadWidth == NULL) || (uploadHeight == NULL)) {
+        return 0;
+    }
+#if PROFILE_PHASES
+    keyHash = psp_gfx_pspgl_ci8_key_hash(indices, palette, width, height, mirrorS, mirrorT);
+    baseHash = psp_gfx_pspgl_ci8_base_hash(indices);
+#endif
+    for (i = 0; i < sTextureCacheCount; i++) {
+        entry = &sTextureCache[i];
+        if ((entry->indices == indices) && (entry->palette == palette) && (entry->width == width) &&
+            (entry->height == height) && (entry->mirrorS == mirrorS) && (entry->mirrorT == mirrorT)) {
+            *textureId = entry->texture;
+            *textureRef = psp_gfx_pspgl_texture_ref(&entry->parameterState);
+            *uploadWidth = entry->uploadWidth;
+            *uploadHeight = entry->uploadHeight;
+#if PROFILE_PHASES
+            PspProfiler_RecordTextureCacheLookup(PSP_PROFILE_TEXTURE_CACHE_CI8, PSP_GFX_PSPGL_CI8_TEXTURE_CACHE_SIZE,
+                                                 sTextureCacheCount, keyHash, baseHash, 1);
+#endif
+            PspProfiler_CountTextureEvent(1, 0, 0, 0, 0);
+            return 1;
+        }
+    }
+#if PROFILE_PHASES
+    PspProfiler_RecordTextureCacheLookup(PSP_PROFILE_TEXTURE_CACHE_CI8, PSP_GFX_PSPGL_CI8_TEXTURE_CACHE_SIZE,
+                                         sTextureCacheCount, keyHash, baseHash, 0);
+#endif
+    return 0;
+}
+
+static u32 psp_gfx_pspgl_create_ci8_texture(const u8* indices, const u16* palette, u32 width, u32 height,
+                                            u32* uploadWidth, u32* uploadHeight, PspGfxPspglTextureRef* textureRef,
+                                            int mirrorS, int mirrorT) {
+    PspGfxTextureCacheEntry* entry;
+    u32 finalWidth;
+    u32 finalHeight;
+    u32 finalPixelCount;
+#if PROFILE_PHASES
+    u64 keyHash;
+    u64 baseHash;
+#endif
+    u32 x;
+    u32 y;
+    u32 i;
+
+    if ((indices == NULL) || (palette == NULL) || (width == 0) || (height == 0) || (uploadWidth == NULL) ||
+        (uploadHeight == NULL) || (textureRef == NULL)) {
+        return 0;
+    }
+    finalWidth = psp_gfx_pspgl_encoded_dimension(width, mirrorS);
+    finalHeight = psp_gfx_pspgl_encoded_dimension(height, mirrorT);
+    finalPixelCount = finalWidth * finalHeight;
+    if (PSP_GFX_PSPGL_STAGING_EXCEEDED(finalPixelCount, mirrorS || mirrorT)) {
+        psp_gfx_pspgl_count_mirror_encoding(width, height, finalWidth, finalHeight, mirrorS, mirrorT, 0, 1);
+        return 0;
+    }
+#if PROFILE_PHASES
+    keyHash = psp_gfx_pspgl_ci8_key_hash(indices, palette, width, height, mirrorS, mirrorT);
+    baseHash = psp_gfx_pspgl_ci8_base_hash(indices);
+#endif
+
+    PspProfiler_CountTextureEvent(0, 1, 0, 0, 0);
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_TEXTURE_DECODE);
+    for (y = 0; y < finalHeight; y++) {
+        u32 srcY = psp_gfx_pspgl_mirror_source_coord(y, height, mirrorT);
+
+        for (x = 0; x < finalWidth; x++) {
+            u32 srcX = psp_gfx_pspgl_mirror_source_coord(x, width, mirrorS);
+            u32 srcIndex = (srcY * width) + srcX;
+            u32 dstIndex = (y * finalWidth) + x;
+
+            psp_gfx_pspgl_rgba16_to_rgba8(psp_gfx_pspgl_read_u16(palette, indices[srcIndex]), &sTextureUpload[dstIndex * 4]);
+        }
+    }
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_TEXTURE_DECODE);
+
+    if (sTextureCacheCount < PSP_GFX_PSPGL_CI8_TEXTURE_CACHE_SIZE) {
+        entry = &sTextureCache[sTextureCacheCount++];
+    } else {
+        entry = NULL;
+        for (i = 0; i < PSP_GFX_PSPGL_CI8_TEXTURE_CACHE_SIZE; i++) {
+            u32 candidate = (sTextureCacheReplaceIndex + i) % PSP_GFX_PSPGL_CI8_TEXTURE_CACHE_SIZE;
+
+            if (!psp_gfx_pspgl_replay_state_pinned(&sTextureCache[candidate].parameterState)) {
+                entry = &sTextureCache[candidate];
+                sTextureCacheReplaceIndex = (candidate + 1) % PSP_GFX_PSPGL_CI8_TEXTURE_CACHE_SIZE;
+                break;
+            }
+        }
+        if (entry == NULL) {
+            return 0;
+        }
+        PspHwCounterProfile_CountTextureCacheEviction(PSP_HW_TEXTURE_CACHE_CI8);
+#if PROFILE_PHASES
+        PspProfiler_RecordTextureCacheEviction(
+            PSP_PROFILE_TEXTURE_CACHE_CI8,
+            psp_gfx_pspgl_ci8_key_hash(entry->indices, entry->palette, entry->width, entry->height,
+                                       entry->mirrorS, entry->mirrorT));
+#endif
+        psp_gfx_pspgl_invalidate_bound_texture();
+        psp_gfx_pspgl_invalidate_fallback_texture_parameter_state(entry->texture);
+        psp_gfx_pspgl_invalidate_texture_parameter_state(&entry->parameterState);
+        glDeleteTextures(1, &entry->texture);
+    }
+    entry->indices = indices;
+    entry->palette = palette;
+    entry->width = width;
+    entry->height = height;
+    entry->mirrorS = mirrorS;
+    entry->mirrorT = mirrorT;
+    entry->uploadWidth = finalWidth;
+    entry->uploadHeight = finalHeight;
+#if PROFILE_PHASES
+    PspProfiler_RecordTextureCacheInsertion(PSP_PROFILE_TEXTURE_CACHE_CI8, PSP_GFX_PSPGL_CI8_TEXTURE_CACHE_SIZE,
+                                            sTextureCacheCount, keyHash, baseHash);
+#endif
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_TEXTURE_UPLOAD);
+    glGenTextures(1, &entry->texture);
+    glBindTexture(GL_TEXTURE_2D, entry->texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    psp_gfx_pspgl_init_texture_parameter_state(&entry->parameterState, entry->texture);
+    *textureRef = psp_gfx_pspgl_texture_ref(&entry->parameterState);
+    psp_gfx_pspgl_note_bound_texture(entry->texture, *textureRef);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, finalWidth, finalHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, sTextureUpload);
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_TEXTURE_UPLOAD);
+    PspProfiler_CountTextureEvent(0, 0, 1, 1, finalPixelCount * 4);
+    psp_gfx_pspgl_count_mirror_encoding(width, height, finalWidth, finalHeight, mirrorS, mirrorT, 1, 0);
+    *uploadWidth = finalWidth;
+    *uploadHeight = finalHeight;
+    return entry->texture;
+}
+
+static u32 psp_gfx_pspgl_rgba16_lookup_set(const u16* pixels, u32 width, u32 height, int premultiply) {
+    u32 hash = (u32) (unsigned long) pixels >> 3;
+
+    hash ^= width << 3;
+    hash ^= height << 11;
+    hash ^= (u32) premultiply << 19;
+    hash ^= hash >> 7;
+    return hash & (PSP_GFX_PSPGL_RGBA16_LOOKUP_SET_COUNT - 1);
+}
+
+static int psp_gfx_pspgl_rgba16_entry_matches(const PspGfxRgba16TextureCacheEntry* entry, const u16* pixels, u32 width,
+                                              u32 height, int premultiply, int mirrorS, int mirrorT) {
+    return (entry->pixels == pixels) && (entry->width == width) && (entry->height == height) &&
+           (entry->premultiplied == premultiply) && (entry->mirrorS == mirrorS) && (entry->mirrorT == mirrorT);
+}
+
+static void psp_gfx_pspgl_remember_rgba16_lookup(u32 set, u32 index) {
+    u8 encodedIndex = (u8) (index + 1);
+
+    if (sRgba16TextureLookup[set][0] != encodedIndex) {
+        sRgba16TextureLookup[set][1] = sRgba16TextureLookup[set][0];
+        sRgba16TextureLookup[set][0] = encodedIndex;
+    }
+}
+
+static int psp_gfx_pspgl_find_rgba16_texture(const u16* pixels, u32 width, u32 height, int premultiply, u32* textureId,
+                                             PspGfxPspglTextureRef* textureRef, u32* uploadWidth, u32* uploadHeight,
+                                             int mirrorS, int mirrorT) {
+    PspGfxRgba16TextureCacheEntry* entry;
+#if PROFILE_PHASES
+    u64 keyHash;
+    u64 baseHash;
+#endif
+    u32 lookupSet;
+    u32 encodedIndex;
+    u32 i;
+
+    if ((pixels == NULL) || (width == 0) || (height == 0) || (textureId == NULL) || (textureRef == NULL) ||
+        (uploadWidth == NULL) || (uploadHeight == NULL)) {
+        return 0;
+    }
+#if PROFILE_PHASES
+    keyHash = psp_gfx_pspgl_rgba16_key_hash(pixels, width, height, premultiply, mirrorS, mirrorT);
+    baseHash = psp_gfx_pspgl_rgba16_base_hash(pixels);
+#endif
+    lookupSet = psp_gfx_pspgl_rgba16_lookup_set(pixels, width, height, premultiply);
+    encodedIndex = sRgba16TextureLookup[lookupSet][0];
+    if (encodedIndex != 0) {
+        i = encodedIndex - 1;
+        entry = &sRgba16TextureCache[i];
+        if (psp_gfx_pspgl_rgba16_entry_matches(entry, pixels, width, height, premultiply, mirrorS, mirrorT)) {
+            goto hit;
+        }
+    }
+    encodedIndex = sRgba16TextureLookup[lookupSet][1];
+    if (encodedIndex != 0) {
+        i = encodedIndex - 1;
+        entry = &sRgba16TextureCache[i];
+        if (psp_gfx_pspgl_rgba16_entry_matches(entry, pixels, width, height, premultiply, mirrorS, mirrorT)) {
+            goto hit;
+        }
+    }
+    for (i = 0; i < sRgba16TextureCacheCount; i++) {
+        entry = &sRgba16TextureCache[i];
+        if (psp_gfx_pspgl_rgba16_entry_matches(entry, pixels, width, height, premultiply, mirrorS, mirrorT)) {
+        hit:
+            psp_gfx_pspgl_remember_rgba16_lookup(lookupSet, i);
+            *textureId = entry->texture;
+            *textureRef = psp_gfx_pspgl_texture_ref(&entry->parameterState);
+            *uploadWidth = entry->uploadWidth;
+            *uploadHeight = entry->uploadHeight;
+#if PROFILE_PHASES
+            PspProfiler_RecordTextureCacheLookup(PSP_PROFILE_TEXTURE_CACHE_RGBA16,
+                                                 PSP_GFX_PSPGL_RGBA16_TEXTURE_CACHE_SIZE, sRgba16TextureCacheCount,
+                                                 keyHash, baseHash, 1);
+#endif
+            PspProfiler_CountTextureEvent(1, 0, 0, 0, 0);
+            return 1;
+        }
+    }
+#if PROFILE_PHASES
+    PspProfiler_RecordTextureCacheLookup(PSP_PROFILE_TEXTURE_CACHE_RGBA16, PSP_GFX_PSPGL_RGBA16_TEXTURE_CACHE_SIZE,
+                                         sRgba16TextureCacheCount, keyHash, baseHash, 0);
+#endif
+    return 0;
+}
+
+void PspGfxPspgl_InvalidateRgba16Texture(const u16* pixels) {
+    u32 i;
+
+    if (pixels == NULL) {
+        return;
+    }
+
+    for (i = 0; i < sRgba16TextureCacheCount;) {
+        PspGfxRgba16TextureCacheEntry* entry = &sRgba16TextureCache[i];
+
+        if (entry->pixels != pixels) {
+            i++;
+            continue;
+        }
+
+        psp_gfx_pspgl_invalidate_bound_texture();
+        psp_gfx_pspgl_invalidate_fallback_texture_parameter_state(entry->texture);
+        psp_gfx_pspgl_invalidate_texture_parameter_state(&entry->parameterState);
+        glDeleteTextures(1, &entry->texture);
+        sRgba16TextureCacheCount--;
+        if (i != sRgba16TextureCacheCount) {
+            *entry = sRgba16TextureCache[sRgba16TextureCacheCount];
+        }
+    }
+
+    memset(sRgba16TextureLookup, 0, sizeof(sRgba16TextureLookup));
+    for (i = 0; i < sRgba16TextureCacheCount; i++) {
+        PspGfxRgba16TextureCacheEntry* entry = &sRgba16TextureCache[i];
+
+        psp_gfx_pspgl_remember_rgba16_lookup(
+            psp_gfx_pspgl_rgba16_lookup_set(entry->pixels, entry->width, entry->height, entry->premultiplied), i);
+    }
+}
+
+static u32 psp_gfx_pspgl_create_rgba16_texture(const u16* pixels, u32 width, u32 height, int premultiply,
+                                               u32* uploadWidth, u32* uploadHeight, PspGfxPspglTextureRef* textureRef,
+                                               int mirrorS, int mirrorT) {
+    PspGfxRgba16TextureCacheEntry* entry;
+    u32 finalWidth;
+    u32 finalHeight;
+    u32 finalPixelCount;
+#if PROFILE_PHASES
+    u64 keyHash;
+    u64 baseHash;
+#endif
+    u32 x;
+    u32 y;
+    int softenAlpha;
+    u32 i;
+
+    if ((pixels == NULL) || (width == 0) || (height == 0) || (uploadWidth == NULL) || (uploadHeight == NULL) ||
+        (textureRef == NULL)) {
+        return 0;
+    }
+    finalWidth = psp_gfx_pspgl_encoded_dimension(width, mirrorS);
+    finalHeight = psp_gfx_pspgl_encoded_dimension(height, mirrorT);
+    finalPixelCount = finalWidth * finalHeight;
+    if (PSP_GFX_PSPGL_STAGING_EXCEEDED(finalPixelCount, mirrorS || mirrorT)) {
+        psp_gfx_pspgl_count_mirror_encoding(width, height, finalWidth, finalHeight, mirrorS, mirrorT, 0, 1);
+        return 0;
+    }
+#if PROFILE_PHASES
+    keyHash = psp_gfx_pspgl_rgba16_key_hash(pixels, width, height, premultiply, mirrorS, mirrorT);
+    baseHash = psp_gfx_pspgl_rgba16_base_hash(pixels);
+#endif
+    softenAlpha = premultiply && psp_gfx_pspgl_is_dark_rgba16_mask(pixels, width, height);
+
+    PspProfiler_CountTextureEvent(0, 1, 0, 0, 0);
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_TEXTURE_DECODE);
+    for (y = 0; y < finalHeight; y++) {
+        u32 srcY = psp_gfx_pspgl_mirror_source_coord(y, height, mirrorT);
+
+        for (x = 0; x < finalWidth; x++) {
+            u32 srcX = psp_gfx_pspgl_mirror_source_coord(x, width, mirrorS);
+            u32 srcIndex = (srcY * width) + srcX;
+            u32 dstIndex = (y * finalWidth) + x;
+
+            u8* out = &sTextureUpload[dstIndex * 4];
+
+            psp_gfx_pspgl_rgba16_to_rgba8(psp_gfx_pspgl_read_u16(pixels, srcIndex), out);
+            if (softenAlpha) {
+                out[0] = 0;
+                out[1] = 0;
+                out[2] = 0;
+                out[3] = psp_gfx_pspgl_filtered_rgba16_alpha(pixels, width, height, srcX, srcY);
+            }
+            if (premultiply) {
+                out[0] = (u8) (((u32) out[0] * out[3] + 127U) / 255U);
+                out[1] = (u8) (((u32) out[1] * out[3] + 127U) / 255U);
+                out[2] = (u8) (((u32) out[2] * out[3] + 127U) / 255U);
+            }
+        }
+    }
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_TEXTURE_DECODE);
+
+    if (sRgba16TextureCacheCount < PSP_GFX_PSPGL_RGBA16_TEXTURE_CACHE_SIZE) {
+        entry = &sRgba16TextureCache[sRgba16TextureCacheCount++];
+        if (entry->parameterState.valid) {
+            psp_gfx_pspgl_invalidate_texture_parameter_state(&entry->parameterState);
+        }
+    } else {
+        entry = NULL;
+        for (i = 0; i < PSP_GFX_PSPGL_RGBA16_TEXTURE_CACHE_SIZE; i++) {
+            u32 candidate = (sRgba16TextureCacheReplaceIndex + i) % PSP_GFX_PSPGL_RGBA16_TEXTURE_CACHE_SIZE;
+
+            if (!psp_gfx_pspgl_replay_state_pinned(&sRgba16TextureCache[candidate].parameterState)) {
+                entry = &sRgba16TextureCache[candidate];
+                sRgba16TextureCacheReplaceIndex = (candidate + 1) % PSP_GFX_PSPGL_RGBA16_TEXTURE_CACHE_SIZE;
+                break;
+            }
+        }
+        if (entry == NULL) {
+            return 0;
+        }
+        PspHwCounterProfile_CountTextureCacheEviction(PSP_HW_TEXTURE_CACHE_RGBA16);
+#if PROFILE_PHASES
+        PspProfiler_RecordTextureCacheEviction(
+            PSP_PROFILE_TEXTURE_CACHE_RGBA16,
+            psp_gfx_pspgl_rgba16_key_hash(entry->pixels, entry->width, entry->height, entry->premultiplied,
+                                          entry->mirrorS, entry->mirrorT));
+#endif
+        psp_gfx_pspgl_invalidate_bound_texture();
+        psp_gfx_pspgl_invalidate_fallback_texture_parameter_state(entry->texture);
+        psp_gfx_pspgl_invalidate_texture_parameter_state(&entry->parameterState);
+        glDeleteTextures(1, &entry->texture);
+    }
+    entry->pixels = pixels;
+    entry->width = width;
+    entry->height = height;
+    entry->mirrorS = mirrorS;
+    entry->mirrorT = mirrorT;
+    entry->uploadWidth = finalWidth;
+    entry->uploadHeight = finalHeight;
+    entry->premultiplied = premultiply;
+    psp_gfx_pspgl_remember_rgba16_lookup(
+        psp_gfx_pspgl_rgba16_lookup_set(pixels, width, height, premultiply),
+        (u32) (entry - sRgba16TextureCache));
+#if PROFILE_PHASES
+    PspProfiler_RecordTextureCacheInsertion(PSP_PROFILE_TEXTURE_CACHE_RGBA16,
+                                            PSP_GFX_PSPGL_RGBA16_TEXTURE_CACHE_SIZE, sRgba16TextureCacheCount, keyHash,
+                                            baseHash);
+#endif
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_TEXTURE_UPLOAD);
+    glGenTextures(1, &entry->texture);
+    glBindTexture(GL_TEXTURE_2D, entry->texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    psp_gfx_pspgl_init_texture_parameter_state(&entry->parameterState, entry->texture);
+    *textureRef = psp_gfx_pspgl_texture_ref(&entry->parameterState);
+    psp_gfx_pspgl_note_bound_texture(entry->texture, *textureRef);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, finalWidth, finalHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, sTextureUpload);
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_TEXTURE_UPLOAD);
+    PspProfiler_CountTextureEvent(0, 0, 1, 1, finalPixelCount * 4);
+    psp_gfx_pspgl_count_mirror_encoding(width, height, finalWidth, finalHeight, mirrorS, mirrorT, 1, 0);
+    *uploadWidth = finalWidth;
+    *uploadHeight = finalHeight;
+    return entry->texture;
+}
+
+static int psp_gfx_pspgl_find_rgba32_texture(const void* pixels, u32 width, u32 height, int premultiply, int envBlend,
+                                             u32 primitiveColor, u32 environmentColor, u32* textureId,
+                                             PspGfxPspglTextureRef* textureRef, u32* uploadWidth, u32* uploadHeight,
+                                             int mirrorS, int mirrorT) {
+    PspGfxRgba32TextureCacheEntry* entry;
+#if PROFILE_PHASES
+    u64 keyHash;
+    u64 baseHash;
+#endif
+    u32 i;
+
+    if ((pixels == NULL) || (width == 0) || (height == 0) || (textureId == NULL) || (textureRef == NULL) ||
+        (uploadWidth == NULL) || (uploadHeight == NULL)) {
+        return 0;
+    }
+    if (envBlend) {
+        primitiveColor &= 0x00FFFFFFU;
+        environmentColor &= 0x00FFFFFFU;
+    }
+#if PROFILE_PHASES
+    keyHash = psp_gfx_pspgl_rgba32_key_hash(pixels, width, height, premultiply, envBlend, primitiveColor,
+                                            environmentColor, mirrorS, mirrorT);
+    baseHash = psp_gfx_pspgl_rgba32_base_hash(pixels);
+#endif
+    for (i = 0; i < sRgba32TextureCacheCount; i++) {
+        entry = &sRgba32TextureCache[i];
+        if ((entry->pixels == pixels) && (entry->width == width) && (entry->height == height) &&
+            (entry->premultiplied == premultiply) && (entry->envBlend == envBlend) &&
+            (entry->primitiveColor == primitiveColor) && (entry->environmentColor == environmentColor) &&
+            (entry->mirrorS == mirrorS) && (entry->mirrorT == mirrorT)) {
+            *textureId = entry->texture;
+            *textureRef = psp_gfx_pspgl_texture_ref(&entry->parameterState);
+            *uploadWidth = entry->uploadWidth;
+            *uploadHeight = entry->uploadHeight;
+#if PROFILE_PHASES
+            PspProfiler_RecordTextureCacheLookup(PSP_PROFILE_TEXTURE_CACHE_RGBA32,
+                                                 PSP_GFX_PSPGL_RGBA32_TEXTURE_CACHE_SIZE, sRgba32TextureCacheCount,
+                                                 keyHash, baseHash, 1);
+#endif
+            PspProfiler_CountTextureEvent(1, 0, 0, 0, 0);
+            return 1;
+        }
+    }
+#if PROFILE_PHASES
+    PspProfiler_RecordTextureCacheLookup(PSP_PROFILE_TEXTURE_CACHE_RGBA32, PSP_GFX_PSPGL_RGBA32_TEXTURE_CACHE_SIZE,
+                                         sRgba32TextureCacheCount, keyHash, baseHash, 0);
+#endif
+    return 0;
+}
+
+static u32 psp_gfx_pspgl_create_rgba32_texture(const void* pixels, u32 width, u32 height, int premultiply, int envBlend,
+                                               u32 primitiveColor, u32 environmentColor, u32* uploadWidth,
+                                               u32* uploadHeight, PspGfxPspglTextureRef* textureRef, int mirrorS,
+                                               int mirrorT) {
+    PspGfxRgba32TextureCacheEntry* entry;
+    u32 finalWidth;
+    u32 finalHeight;
+    u32 finalPixelCount;
+#if PROFILE_PHASES
+    u64 keyHash;
+    u64 baseHash;
+#endif
+    u32 x;
+    u32 y;
+    u32 i;
+
+    if ((pixels == NULL) || (width == 0) || (height == 0) || (uploadWidth == NULL) || (uploadHeight == NULL) ||
+        (textureRef == NULL)) {
+        return 0;
+    }
+    if (envBlend) {
+        primitiveColor &= 0x00FFFFFFU;
+        environmentColor &= 0x00FFFFFFU;
+    }
+    finalWidth = psp_gfx_pspgl_encoded_dimension(width, mirrorS);
+    finalHeight = psp_gfx_pspgl_encoded_dimension(height, mirrorT);
+    finalPixelCount = finalWidth * finalHeight;
+    if (PSP_GFX_PSPGL_STAGING_EXCEEDED(finalPixelCount, mirrorS || mirrorT)) {
+        psp_gfx_pspgl_count_mirror_encoding(width, height, finalWidth, finalHeight, mirrorS, mirrorT, 0, 1);
+        return 0;
+    }
+#if PROFILE_PHASES
+    keyHash = psp_gfx_pspgl_rgba32_key_hash(pixels, width, height, premultiply, envBlend, primitiveColor,
+                                            environmentColor, mirrorS, mirrorT);
+    baseHash = psp_gfx_pspgl_rgba32_base_hash(pixels);
+#endif
+    PspProfiler_CountTextureEvent(0, 1, 0, 0, 0);
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_TEXTURE_DECODE);
+    for (y = 0; y < finalHeight; y++) {
+        u32 srcY = psp_gfx_pspgl_mirror_source_coord(y, height, mirrorT);
+
+        for (x = 0; x < finalWidth; x++) {
+            u32 srcX = psp_gfx_pspgl_mirror_source_coord(x, width, mirrorS);
+            u32 srcIndex = (srcY * width) + srcX;
+            u32 dstIndex = (y * finalWidth) + x;
+            u32 texel = psp_gfx_pspgl_read_n64_rgba32(pixels, srcIndex);
+            /* Transfer applies to texture RGB only; the envBlend inputs below
+             * (primitiveColor/environmentColor) arrive already transformed
+             * from the frontend, so the baked result needs no second pass. */
+            u8 r = psp_gfx_color_transfer_u8((u8) ((texel >> 24) & 0xFFU));
+            u8 g = psp_gfx_color_transfer_u8((u8) ((texel >> 16) & 0xFFU));
+            u8 b = psp_gfx_color_transfer_u8((u8) ((texel >> 8) & 0xFFU));
+            u8 a = (u8) (texel & 0xFFU);
+            u8* out = &sTextureUpload[dstIndex * 4];
+
+            if (envBlend) {
+                u8 pr = (u8) (primitiveColor & 0xFFU);
+                u8 pg = (u8) ((primitiveColor >> 8) & 0xFFU);
+                u8 pb = (u8) ((primitiveColor >> 16) & 0xFFU);
+                u8 er = (u8) (environmentColor & 0xFFU);
+                u8 eg = (u8) ((environmentColor >> 8) & 0xFFU);
+                u8 eb = (u8) ((environmentColor >> 16) & 0xFFU);
+
+                r = (u8) (((u32) er * (255U - r) + ((u32) pr * r) + 127U) / 255U);
+                g = (u8) (((u32) eg * (255U - g) + ((u32) pg * g) + 127U) / 255U);
+                b = (u8) (((u32) eb * (255U - b) + ((u32) pb * b) + 127U) / 255U);
+            } else if (premultiply) {
+                r = (u8) ((((u32) r * a) + 127U) / 255U);
+                g = (u8) ((((u32) g * a) + 127U) / 255U);
+                b = (u8) ((((u32) b * a) + 127U) / 255U);
+            }
+            out[0] = r;
+            out[1] = g;
+            out[2] = b;
+            out[3] = a;
+        }
+    }
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_TEXTURE_DECODE);
+
+    if (sRgba32TextureCacheCount < PSP_GFX_PSPGL_RGBA32_TEXTURE_CACHE_SIZE) {
+        entry = &sRgba32TextureCache[sRgba32TextureCacheCount++];
+    } else {
+        entry = NULL;
+        for (i = 0; i < PSP_GFX_PSPGL_RGBA32_TEXTURE_CACHE_SIZE; i++) {
+            u32 candidate = (sRgba32TextureCacheReplaceIndex + i) % PSP_GFX_PSPGL_RGBA32_TEXTURE_CACHE_SIZE;
+
+            if (!psp_gfx_pspgl_replay_state_pinned(&sRgba32TextureCache[candidate].parameterState)) {
+                entry = &sRgba32TextureCache[candidate];
+                sRgba32TextureCacheReplaceIndex = (candidate + 1) % PSP_GFX_PSPGL_RGBA32_TEXTURE_CACHE_SIZE;
+                break;
+            }
+        }
+        if (entry == NULL) {
+            return 0;
+        }
+        PspHwCounterProfile_CountTextureCacheEviction(PSP_HW_TEXTURE_CACHE_RGBA32);
+#if PROFILE_PHASES
+        PspProfiler_RecordTextureCacheEviction(
+            PSP_PROFILE_TEXTURE_CACHE_RGBA32,
+            psp_gfx_pspgl_rgba32_key_hash(entry->pixels, entry->width, entry->height, entry->premultiplied,
+                                          entry->envBlend, entry->primitiveColor, entry->environmentColor,
+                                          entry->mirrorS, entry->mirrorT));
+#endif
+        psp_gfx_pspgl_invalidate_bound_texture();
+        psp_gfx_pspgl_invalidate_fallback_texture_parameter_state(entry->texture);
+        psp_gfx_pspgl_invalidate_texture_parameter_state(&entry->parameterState);
+        glDeleteTextures(1, &entry->texture);
+    }
+    entry->pixels = pixels;
+    entry->width = width;
+    entry->height = height;
+    entry->mirrorS = mirrorS;
+    entry->mirrorT = mirrorT;
+    entry->uploadWidth = finalWidth;
+    entry->uploadHeight = finalHeight;
+    entry->premultiplied = premultiply;
+    entry->envBlend = envBlend;
+    entry->primitiveColor = primitiveColor;
+    entry->environmentColor = environmentColor;
+#if PROFILE_PHASES
+    PspProfiler_RecordTextureCacheInsertion(PSP_PROFILE_TEXTURE_CACHE_RGBA32,
+                                            PSP_GFX_PSPGL_RGBA32_TEXTURE_CACHE_SIZE, sRgba32TextureCacheCount,
+                                            keyHash, baseHash);
+#endif
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_TEXTURE_UPLOAD);
+    glGenTextures(1, &entry->texture);
+    glBindTexture(GL_TEXTURE_2D, entry->texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    psp_gfx_pspgl_init_texture_parameter_state(&entry->parameterState, entry->texture);
+    *textureRef = psp_gfx_pspgl_texture_ref(&entry->parameterState);
+    psp_gfx_pspgl_note_bound_texture(entry->texture, *textureRef);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, finalWidth, finalHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, sTextureUpload);
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_TEXTURE_UPLOAD);
+    PspProfiler_CountTextureEvent(0, 0, 1, 1, finalPixelCount * 4);
+    psp_gfx_pspgl_count_mirror_encoding(width, height, finalWidth, finalHeight, mirrorS, mirrorT, 1, 0);
+    *uploadWidth = finalWidth;
+    *uploadHeight = finalHeight;
+    return entry->texture;
+}
+
+static PspGfxConvertedTextureFormat psp_gfx_pspgl_converted_format(const PspGfxTextureRequest* request) {
+    if (request->format == PSP_GFX_TEXTURE_CI4) {
+        return PSP_GFX_CONVERTED_CI4;
+    }
+    if (request->format == PSP_GFX_TEXTURE_IA8) {
+        return request->softCoverage ? PSP_GFX_CONVERTED_IA8_SOFT_COVERAGE : PSP_GFX_CONVERTED_IA8;
+    }
+    return request->softCoverage ? PSP_GFX_CONVERTED_IA16_SOFT_COVERAGE : PSP_GFX_CONVERTED_IA16;
+}
+
+int PspGfxPspgl_TextureSupported(const PspGfxTextureRequest* request) {
+    if (request == NULL) {
+        return 0;
+    }
+    if (!request->mirrorS && !request->mirrorT) {
+        return 1;
+    }
+    return psp_gfx_pspgl_can_mirror_encode(request->width, request->height, request->mirrorS, request->mirrorT);
+}
+
+int PspGfxPspgl_FindTexture(const PspGfxTextureRequest* request, u32* textureId, PspGfxPspglTextureRef* textureRef,
+                            u32* uploadWidth, u32* uploadHeight, u32* uploadX, u32* uploadY) {
+    int mirrorS;
+    int mirrorT;
+
+    if (request == NULL) {
+        return 0;
+    }
+    mirrorS = request->mirrorS != 0;
+    mirrorT = request->mirrorT != 0;
+    *uploadX = 0;
+    *uploadY = 0;
+    switch (request->format) {
+        case PSP_GFX_TEXTURE_CI8:
+            return psp_gfx_pspgl_find_ci8_texture(request->pixels, request->palette, request->width, request->height,
+                                                  textureId, textureRef, uploadWidth, uploadHeight, mirrorS, mirrorT);
+        case PSP_GFX_TEXTURE_CI4:
+        case PSP_GFX_TEXTURE_IA8:
+        case PSP_GFX_TEXTURE_IA16:
+            return psp_gfx_pspgl_find_converted_texture(
+                request->pixels, request->palette, request->width, request->height,
+                psp_gfx_pspgl_converted_format(request), textureId, textureRef, uploadWidth, uploadHeight, uploadX,
+                uploadY, request->envBlend, request->primitiveColor, request->environmentColor, mirrorS, mirrorT, 1);
+        case PSP_GFX_TEXTURE_RGBA16:
+            return psp_gfx_pspgl_find_rgba16_texture(request->pixels, request->width, request->height,
+                                                     request->premultiply, textureId, textureRef, uploadWidth,
+                                                     uploadHeight, mirrorS, mirrorT);
+        case PSP_GFX_TEXTURE_RGBA32:
+            return psp_gfx_pspgl_find_rgba32_texture(request->pixels, request->width, request->height,
+                                                     request->premultiply, request->envBlend, request->primitiveColor,
+                                                     request->environmentColor, textureId, textureRef, uploadWidth,
+                                                     uploadHeight, mirrorS, mirrorT);
+        default:
+            return 0;
+    }
+}
+
+u32 PspGfxPspgl_CreateTexture(const PspGfxTextureRequest* request, PspGfxPspglTextureRef* textureRef, u32* uploadWidth,
+                              u32* uploadHeight, u32* uploadX, u32* uploadY) {
+    int mirrorS;
+    int mirrorT;
+
+    if (request == NULL) {
+        return 0;
+    }
+    mirrorS = request->mirrorS != 0;
+    mirrorT = request->mirrorT != 0;
+    *uploadX = 0;
+    *uploadY = 0;
+    switch (request->format) {
+        case PSP_GFX_TEXTURE_CI8:
+            return psp_gfx_pspgl_create_ci8_texture(request->pixels, request->palette, request->width, request->height,
+                                                    uploadWidth, uploadHeight, textureRef, mirrorS, mirrorT);
+        case PSP_GFX_TEXTURE_CI4:
+        case PSP_GFX_TEXTURE_IA8:
+        case PSP_GFX_TEXTURE_IA16:
+            return psp_gfx_pspgl_create_converted_texture(
+                request->pixels, request->palette, request->width, request->height,
+                psp_gfx_pspgl_converted_format(request), request->envBlend, request->primitiveColor,
+                request->environmentColor, uploadWidth, uploadHeight, uploadX, uploadY, textureRef, mirrorS, mirrorT);
+        case PSP_GFX_TEXTURE_RGBA16:
+            return psp_gfx_pspgl_create_rgba16_texture(request->pixels, request->width, request->height,
+                                                       request->premultiply, uploadWidth, uploadHeight, textureRef,
+                                                       mirrorS, mirrorT);
+        case PSP_GFX_TEXTURE_RGBA32:
+            return psp_gfx_pspgl_create_rgba32_texture(request->pixels, request->width, request->height,
+                                                       request->premultiply, request->envBlend, request->primitiveColor,
+                                                       request->environmentColor, uploadWidth, uploadHeight, textureRef,
+                                                       mirrorS, mirrorT);
+        default:
+            return 0;
+    }
+}
+
+static u32 psp_gfx_pspgl_is_small_draw(u32 vertexCount) {
+    return vertexCount <= PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_PAGE_VERTICES;
+}
+
+static u32 psp_gfx_pspgl_is_large_draw(u32 vertexCount) {
+    return !psp_gfx_pspgl_is_small_draw(vertexCount) &&
+           (vertexCount <= PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_VERTICES);
+}
+
+static void psp_gfx_pspgl_begin_vertex_stream_upload_phase(u32 smallDraw, u32 largeDraw) {
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_VERTEX_STREAM_UPLOAD);
+    if (smallDraw) {
+        PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_VERTEX_STREAM_UPLOAD_SMALL);
+    } else if (largeDraw) {
+        PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_VERTEX_STREAM_UPLOAD_LARGE);
+    }
+}
+
+static void psp_gfx_pspgl_end_vertex_stream_upload_phase(u32 smallDraw, u32 largeDraw) {
+    if (smallDraw) {
+        PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_VERTEX_STREAM_UPLOAD_SMALL);
+    } else if (largeDraw) {
+        PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_VERTEX_STREAM_UPLOAD_LARGE);
+    }
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_VERTEX_STREAM_UPLOAD);
+}
+
+static void psp_gfx_pspgl_begin_submit_phase(u32 smallDraw, u32 largeDraw) {
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_SUBMIT);
+    if (smallDraw) {
+        PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_SUBMIT_SMALL);
+    } else if (largeDraw) {
+        PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_SUBMIT_LARGE);
+    }
+}
+
+static void psp_gfx_pspgl_end_submit_phase(u32 smallDraw, u32 largeDraw) {
+    if (smallDraw) {
+        PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_SUBMIT_SMALL);
+    } else if (largeDraw) {
+        PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_SUBMIT_LARGE);
+    }
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_SUBMIT);
+}
+
+int PspGfxPspgl_ReserveColoredVertices(u32 vertexCapacity, PspGfxPspglVertexReservation* reservation) {
+    PspGfxVertexStreamPage* page;
+    void* mapped;
+
+    if (!sVertexStreamAvailable || (reservation == NULL) || (vertexCapacity == 0) ||
+        (vertexCapacity > PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_PAGE_VERTICES) ||
+        sVertexStreamSmallArenaExhausted ||
+        (vertexCapacity >
+         (PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_ARENA_VERTICES - sVertexStreamSmallArenaVertexIndex))) {
+        return 0;
+    }
+
+    page = &sVertexStreamSmallArenas[sVertexStreamSetIndex];
+    if (sVertexStreamSmallArenaMapped == NULL) {
+        psp_gfx_pspgl_bind_vbo_arrays(page->buffer);
+        mapped = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+        if (mapped == NULL) {
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            sVertexStreamSmallArenaExhausted = 1;
+            return 0;
+        }
+        sVertexStreamSmallArenaMapped = mapped;
+        sVertexStreamSmallArenaMappedSet = sVertexStreamSetIndex;
+    }
+
+    reservation->vertices =
+        (PspGfxPspglColorVertex*) ((u8*) sVertexStreamSmallArenaMapped +
+                                   (sVertexStreamSmallArenaVertexIndex * sizeof(PspGfxPspglColorVertex)));
+    reservation->firstVertex = sVertexStreamSmallArenaVertexIndex;
+    reservation->capacity = vertexCapacity;
+    sVertexStreamSmallArenaVertexIndex += vertexCapacity;
+    return 1;
+}
+
+static void psp_gfx_pspgl_draw_reserved_stream(const PspGfxPspglVertexReservation* reservation,
+                                               u32 vertexCount, GLenum primitive) {
+    u32 smallDraw = psp_gfx_pspgl_is_small_draw(vertexCount);
+    u32 largeDraw = psp_gfx_pspgl_is_large_draw(vertexCount);
+    u32 highWater = (sVertexStreamSmallArenaVertexIndex * sizeof(PspGfxPspglColorVertex)) +
+                    (sVertexStreamLargePageIndex * PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_BYTES);
+
+    psp_gfx_pspgl_begin_submit_phase(smallDraw, largeDraw);
+    glDrawArrays(primitive, reservation->firstVertex, vertexCount);
+    psp_gfx_pspgl_end_submit_phase(smallDraw, largeDraw);
+    PspProfiler_CountDrawCall(vertexCount);
+    PspProfiler_CountPspglSubmitSplit(smallDraw, largeDraw, vertexCount);
+    PspProfiler_CountVertexStream(1, vertexCount, 0, 0, 0, 0, 0, PSP_GFX_PSPGL_VERTEX_STREAM_SET_BYTES,
+                                  highWater, smallDraw, largeDraw, smallDraw ? vertexCount : 0,
+                                  largeDraw ? vertexCount : 0);
+    (void) highWater;
+}
+
+static void psp_gfx_pspgl_draw_client_arrays(const PspGfxPspglColorVertex* vertices, u32 vertexCount,
+                                             GLenum primitive) {
+    u32 smallDraw = psp_gfx_pspgl_is_small_draw(vertexCount);
+    u32 largeDraw = psp_gfx_pspgl_is_large_draw(vertexCount);
+
+    psp_gfx_pspgl_unmap_small_arena();
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+
+    psp_gfx_pspgl_bind_client_arrays(vertices);
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+    psp_gfx_pspgl_begin_submit_phase(smallDraw, largeDraw);
+    glDrawArrays(primitive, 0, vertexCount);
+    psp_gfx_pspgl_end_submit_phase(smallDraw, largeDraw);
+    PspProfiler_CountDrawCall(vertexCount);
+    PspProfiler_CountPspglSubmitSplit(smallDraw, largeDraw, vertexCount);
+    PspProfiler_CountVertexStream(
+        0, 0, 0, 0, 1, vertexCount, 0, PSP_GFX_PSPGL_VERTEX_STREAM_SET_BYTES,
+        (sVertexStreamSmallArenaVertexIndex * sizeof(PspGfxPspglColorVertex)) +
+            (sVertexStreamLargePageIndex * PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_BYTES),
+        0, 0, 0, 0);
+}
+
+static int psp_gfx_pspgl_draw_vbo_stream(const PspGfxPspglColorVertex* vertices, u32 vertexCount,
+                                         GLenum primitive) {
+    PspGfxVertexStreamPage* page;
+    void* mapped;
+    u32 pageIndex;
+    u32 firstVertex;
+    u32 bytes;
+    u32 highWater;
+    u32 pageSwitch;
+    u32 smallDraw;
+    u32 largeDraw;
+    u32 useArena;
+
+    if (!sVertexStreamAvailable) {
+        return 0;
+    }
+
+    smallDraw = psp_gfx_pspgl_is_small_draw(vertexCount);
+    largeDraw = psp_gfx_pspgl_is_large_draw(vertexCount);
+    bytes = vertexCount * sizeof(PspGfxPspglColorVertex);
+    useArena = !sVertexStreamSmallArenaExhausted &&
+               (smallDraw || largeDraw) &&
+               (vertexCount <=
+                (PSP_GFX_PSPGL_VERTEX_STREAM_SMALL_ARENA_VERTICES - sVertexStreamSmallArenaVertexIndex));
+    if (useArena) {
+        firstVertex = sVertexStreamSmallArenaVertexIndex;
+        page = &sVertexStreamSmallArenas[sVertexStreamSetIndex];
+        pageSwitch = (sVertexStreamSmallArenaVertexIndex != 0) || (sVertexStreamLargePageIndex != 0);
+        highWater = ((sVertexStreamSmallArenaVertexIndex + vertexCount) * sizeof(PspGfxPspglColorVertex)) +
+                    (sVertexStreamLargePageIndex * PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_BYTES);
+    } else if (largeDraw) {
+        psp_gfx_pspgl_unmap_small_arena();
+        if (sVertexStreamLargePageIndex >= PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGES_PER_SET) {
+            return 0;
+        }
+        pageIndex = (sVertexStreamSetIndex * PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGES_PER_SET) +
+                    sVertexStreamLargePageIndex;
+        page = &sVertexStreamLargePages[pageIndex];
+        firstVertex = 0;
+        pageSwitch = (sVertexStreamSmallArenaVertexIndex != 0) || (sVertexStreamLargePageIndex != 0);
+        highWater = (sVertexStreamSmallArenaVertexIndex * sizeof(PspGfxPspglColorVertex)) +
+                    ((sVertexStreamLargePageIndex + 1) * PSP_GFX_PSPGL_VERTEX_STREAM_LARGE_PAGE_BYTES);
+    } else {
+        if (smallDraw) {
+            sVertexStreamSmallArenaExhausted = 1;
+        }
+        return 0;
+    }
+
+    (void) pageSwitch;
+    (void) highWater;
+
+    if (useArena && (sVertexStreamSmallArenaMapped == NULL)) {
+        PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+        psp_gfx_pspgl_bind_vbo_arrays(page->buffer);
+        PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+    } else if (!useArena) {
+        PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+        glBindBuffer(GL_ARRAY_BUFFER, page->buffer);
+        PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+    }
+
+    psp_gfx_pspgl_begin_vertex_stream_upload_phase(smallDraw, largeDraw);
+    if (useArena) {
+        if (sVertexStreamSmallArenaMapped == NULL) {
+            mapped = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+            if (mapped == NULL) {
+                psp_gfx_pspgl_end_vertex_stream_upload_phase(smallDraw, largeDraw);
+                PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+                glBindBuffer(GL_ARRAY_BUFFER, 0);
+                PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+                sVertexStreamSmallArenaExhausted = 1;
+                return 0;
+            }
+            sVertexStreamSmallArenaMapped = mapped;
+            sVertexStreamSmallArenaMappedSet = sVertexStreamSetIndex;
+        }
+        memcpy((u8*) sVertexStreamSmallArenaMapped + (firstVertex * sizeof(PspGfxPspglColorVertex)), vertices,
+               bytes);
+    } else {
+        mapped = glMapBuffer(GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+        if (mapped == NULL) {
+            psp_gfx_pspgl_end_vertex_stream_upload_phase(smallDraw, largeDraw);
+            PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+            return 0;
+        }
+        memcpy(mapped, vertices, bytes);
+        glUnmapBuffer(GL_ARRAY_BUFFER);
+    }
+    psp_gfx_pspgl_end_vertex_stream_upload_phase(smallDraw, largeDraw);
+    PspProfiler_CountPspglVertexStreamUploadSplit(smallDraw, largeDraw, bytes);
+
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+    if (useArena) {
+        sVertexStreamSmallArenaVertexIndex += vertexCount;
+    } else {
+        psp_gfx_pspgl_bind_vbo_arrays(page->buffer);
+        sVertexStreamLargePageIndex++;
+    }
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+    PspProfiler_CountVertexStream(0, 0, 1, bytes, 0, 0, pageSwitch, PSP_GFX_PSPGL_VERTEX_STREAM_SET_BYTES,
+                                  highWater, 0, 0, 0, 0);
+
+    psp_gfx_pspgl_begin_submit_phase(smallDraw, largeDraw);
+    glDrawArrays(primitive, firstVertex, vertexCount);
+    psp_gfx_pspgl_end_submit_phase(smallDraw, largeDraw);
+    PspProfiler_CountDrawCall(vertexCount);
+    PspProfiler_CountPspglSubmitSplit(smallDraw, largeDraw, vertexCount);
+    PspProfiler_CountVertexStream(1, vertexCount, 0, 0, 0, 0, 0, PSP_GFX_PSPGL_VERTEX_STREAM_SET_BYTES,
+                                  highWater, smallDraw, largeDraw, smallDraw ? vertexCount : 0,
+                                  largeDraw ? vertexCount : 0);
+    return 1;
+}
+
+static void psp_gfx_pspgl_draw_colored(const PspGfxPspglColorVertex* vertices, u32 vertexCount,
+    GLenum primitive,
+    u32 textureId, PspGfxPspglTextureRef textureRef, PspGfxPspglTextureEnv textureEnv,
+    u32 textureEnvColor, PspGfxPspglTextureWrap wrapS, PspGfxPspglTextureWrap wrapT, int alphaTest,
+    int blend, int premultiplied, int depthTest, int depthWrite, int fog, const float* fogColor, float fogStart, float fogEnd,
+    const float* projectionMatrix, u32 projectionSerial, int pretransformed, int pointFilter,
+    const PspGfxPspglVertexReservation* reservation, int uiViewport
+) {
+    GLint glTextureEnv;
+    GLint glWrapS;
+    GLint glWrapT;
+    PspGfxPspglTextureParameterState* textureParameterState;
+
+    if ((vertices == NULL) || (vertexCount == 0)) {
+        return;
+    }
+
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+
+    psp_gfx_pspgl_select_viewport(uiViewport);
+
+    if (pretransformed || (projectionMatrix == NULL)) {
+        psp_gfx_pspgl_load_projection_identity();
+    } else {
+        psp_gfx_pspgl_load_projection_matrix(projectionMatrix, projectionSerial);
+    }
+
+    if (depthTest) {
+        psp_gfx_pspgl_depth_test(1);
+        psp_gfx_pspgl_depth_func(GL_LEQUAL);
+    } else {
+        psp_gfx_pspgl_depth_test(0);
+    }
+
+    psp_gfx_pspgl_depth_mask(depthWrite ? GL_TRUE : GL_FALSE);
+
+    if (fog &&
+        !pretransformed &&
+        (fogColor != NULL) &&
+        (fogEnd > fogStart)) {
+
+        psp_gfx_pspgl_fog_linear(fogColor, fogStart, fogEnd);
+    } else {
+        psp_gfx_pspgl_fog_disabled();
+    }
+
+    // this controls GL_TEXTURE_2D, but does not disable GL_TEXTURE_COORD_ARRAY for untextured geometry
+    if (textureId != 0) {
+#if PSP_RENDERER_DIAGNOSTICS
+        /*
+         * textureId is nonzero (the frontend resolved a texture) but the
+         * retained textureRef/GL handle it carried along doesn't match the
+         * cache slot's current generation. This distinguishes a frontend
+         * preparation failure (textureId == 0) from a stale/invalidated
+         * cache reference surviving past an eviction.
+         */
+        if (!psp_gfx_pspgl_texture_ref_valid(textureId, &textureRef) && (sInvalidTextureRefDiagCount < 32)) {
+            char line[224];
+
+            snprintf(line, sizeof(line),
+                     "[pspgl-texref-invalid] diag=%lu texId=%lu refTexture=%lu refGeneration=%lu refState=%p "
+                     "stateValid=%d stateTexture=%lu stateGeneration=%lu",
+                     (unsigned long) sInvalidTextureRefDiagCount, (unsigned long) textureId,
+                     (unsigned long) textureRef.texture, (unsigned long) textureRef.generation,
+                     (void*) textureRef.state, (textureRef.state != NULL) ? textureRef.state->valid : -1,
+                     (textureRef.state != NULL) ? (unsigned long) textureRef.state->texture : 0UL,
+                     (textureRef.state != NULL) ? (unsigned long) textureRef.state->generation : 0UL);
+            PspPlatform_LogLine(line);
+            sInvalidTextureRefDiagCount++;
+        }
+#endif
+        psp_gfx_pspgl_texture_2d(1);
+
+        if (alphaTest) {
+            psp_gfx_pspgl_alpha_test(1);
+            psp_gfx_pspgl_alpha_func(GL_GREATER, (alphaTest > 1) ? 0.5f : 0.0f);
+        } else {
+            psp_gfx_pspgl_alpha_test(0);
+        }
+
+        if (blend) {
+            psp_gfx_pspgl_blend(1);
+            psp_gfx_pspgl_blend_func(
+                premultiplied ? GL_ONE : GL_SRC_ALPHA,
+                GL_ONE_MINUS_SRC_ALPHA
+            );
+        } else {
+            psp_gfx_pspgl_blend(0);
+        }
+
+        textureParameterState = psp_gfx_pspgl_bind_texture(textureId, textureRef);
+
+        glWrapS =
+            (wrapS == PSP_GFX_PSPGL_WRAP_CLAMP)
+                ? GL_CLAMP_TO_EDGE
+                : GL_REPEAT;
+
+        glWrapT =
+            (wrapT == PSP_GFX_PSPGL_WRAP_CLAMP)
+                ? GL_CLAMP_TO_EDGE
+                : GL_REPEAT;
+
+        psp_gfx_pspgl_set_texture_wrap(textureId, textureParameterState, glWrapS, glWrapT);
+        psp_gfx_pspgl_set_texture_filter(textureParameterState, pointFilter ? GL_NEAREST : GL_LINEAR,
+                                         pointFilter ? GL_NEAREST : GL_LINEAR);
+
+        if (textureEnv == PSP_GFX_PSPGL_TEX_BLEND) {
+            glTextureEnv = GL_BLEND;
+        } else if (textureEnv == PSP_GFX_PSPGL_TEX_MODULATE) {
+            glTextureEnv = GL_MODULATE;
+        } else {
+            glTextureEnv = GL_REPLACE;
+        }
+
+        psp_gfx_pspgl_texture_env_mode(glTextureEnv);
+        if (textureEnv == PSP_GFX_PSPGL_TEX_BLEND) {
+            psp_gfx_pspgl_texture_env_color(textureEnvColor);
+        }
+    } else {
+        psp_gfx_pspgl_texture_2d(0);
+        psp_gfx_pspgl_alpha_test(0);
+        psp_gfx_pspgl_blend(0);
+    }
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+
+    if (reservation != NULL) {
+        psp_gfx_pspgl_draw_reserved_stream(reservation, vertexCount, primitive);
+    } else if (!psp_gfx_pspgl_draw_vbo_stream(vertices, vertexCount, primitive)) {
+        psp_gfx_pspgl_draw_client_arrays(vertices, vertexCount, primitive);
+    }
+}
+
+void PspGfxPspgl_DrawColoredTriangles(const PspGfxPspglColorVertex* vertices, u32 vertexCount, u32 textureId,
+                                      PspGfxPspglTextureRef textureRef, PspGfxPspglTextureEnv textureEnv,
+                                      u32 textureEnvColor, PspGfxPspglTextureWrap wrapS, PspGfxPspglTextureWrap wrapT,
+                                      int alphaTest, int blend, int premultiplied, int depthTest, int depthWrite,
+                                      int fog, const float* fogColor, float fogStart, float fogEnd,
+                                      const float* projectionMatrix, u32 projectionSerial, int pretransformed,
+                                      int pointFilter, int uiViewport) {
+    if ((vertices != NULL) && (vertexCount != 0)) {
+        psp_gfx_pspgl_replay_capture_colored(vertices, vertexCount, PSP_GFX_PSPGL_REPLAY_TRIANGLES, textureId,
+                                             textureRef, textureEnv, textureEnvColor, wrapS, wrapT, alphaTest, blend,
+                                             premultiplied, depthTest, depthWrite, fog, fogColor, fogStart, fogEnd,
+                                             projectionMatrix, projectionSerial, pretransformed, pointFilter,
+                                             uiViewport);
+    }
+    psp_gfx_pspgl_draw_colored(vertices, vertexCount, GL_TRIANGLES, textureId, textureRef, textureEnv, textureEnvColor,
+                               wrapS, wrapT, alphaTest, blend, premultiplied, depthTest, depthWrite, fog, fogColor,
+                               fogStart, fogEnd, projectionMatrix, projectionSerial, pretransformed, pointFilter, NULL,
+                               uiViewport);
+}
+
+void PspGfxPspgl_DrawFogTriangles(const PspGfxPspglFogVertex* vertices, u32 vertexCount, const float* projectionMatrix,
+                                  u32 projectionSerial, int pretransformed, int depthTest, int uiViewport) {
+    u32 smallDraw;
+    u32 largeDraw;
+
+    if ((vertices == NULL) || (vertexCount == 0)) {
+        return;
+    }
+#if PSP_ORIGINAL_FOG
+    psp_gfx_pspgl_replay_capture_fog(vertices, vertexCount, projectionMatrix, projectionSerial, pretransformed,
+                                     depthTest, uiViewport);
+#endif
+    smallDraw = psp_gfx_pspgl_is_small_draw(vertexCount);
+    largeDraw = psp_gfx_pspgl_is_large_draw(vertexCount);
+    psp_gfx_pspgl_unmap_small_arena();
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+    psp_gfx_pspgl_select_viewport(uiViewport);
+    if (pretransformed || (projectionMatrix == NULL)) {
+        psp_gfx_pspgl_load_projection_identity();
+    } else {
+        psp_gfx_pspgl_load_projection_matrix(projectionMatrix, projectionSerial);
+    }
+    psp_gfx_pspgl_depth_test(depthTest);
+    if (depthTest) {
+        psp_gfx_pspgl_depth_func(GL_EQUAL);
+    }
+    psp_gfx_pspgl_depth_mask(GL_FALSE);
+    psp_gfx_pspgl_fog_disabled();
+    psp_gfx_pspgl_texture_2d(0);
+    psp_gfx_pspgl_alpha_test(0);
+    psp_gfx_pspgl_blend(1);
+    psp_gfx_pspgl_blend_func(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    psp_gfx_pspgl_bind_fog_arrays(vertices);
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+
+    psp_gfx_pspgl_begin_submit_phase(smallDraw, largeDraw);
+    glDrawArrays(GL_TRIANGLES, 0, vertexCount);
+    psp_gfx_pspgl_end_submit_phase(smallDraw, largeDraw);
+    PspProfiler_CountDrawCall(vertexCount);
+    PspProfiler_CountPspglSubmitSplit(smallDraw, largeDraw, vertexCount);
+}
+
+void PspGfxPspgl_BeginReplayCache(void) {
+    sReplayCacheDrawCount = 0;
+    sReplayCacheVertexCount = 0;
+    sReplayCacheReady = 0;
+    sReplayCacheCaptureFailed = 0;
+    sReplayCacheCapturing = 1;
+#if PSP_ORIGINAL_FOG
+    sReplayCacheFogVertexCount = 0;
+#endif
+}
+
+void PspGfxPspgl_EndReplayCache(void) {
+    sReplayCacheCapturing = 0;
+    sReplayCacheReady = !sReplayCacheCaptureFailed && (sReplayCacheDrawCount != 0);
+}
+
+int PspGfxPspgl_ReplayCacheReady(void) {
+    if (sReplayCacheReady && !psp_gfx_pspgl_replay_textures_valid()) {
+        PspGfxPspgl_ReplayCacheInvalidate();
+    }
+    return sReplayCacheReady;
+}
+
+void PspGfxPspgl_ReplayCacheInvalidate(void) {
+    sReplayCacheCapturing = 0;
+    sReplayCacheReady = 0;
+    sReplayCacheCaptureFailed = 0;
+    sReplayCacheDrawCount = 0;
+    sReplayCacheVertexCount = 0;
+#if PSP_ORIGINAL_FOG
+    sReplayCacheFogVertexCount = 0;
+#endif
+}
+
+void PspGfxPspgl_ReplayCache(void) {
+    u32 i;
+    u32 drawCount;
+
+    if (!PspGfxPspgl_ReplayCacheReady()) {
+        return;
+    }
+    drawCount = sReplayCacheDrawCount;
+    sReplayCacheReplaying = 1;
+    for (i = 0; i < drawCount; i++) {
+        PspGfxPspglReplayDraw* draw = &sReplayCacheDraws[i];
+
+        PspGfxPspgl_SetHudAnchor(draw->hudAnchorX, draw->hudAnchorY);
+        if (draw->scissorEnabled) {
+            PspGfxPspgl_SetScissor(draw->scissorUlx, draw->scissorUly, draw->scissorLrx, draw->scissorLry);
+        } else {
+            PspGfxPspgl_ClearScissor();
+        }
+        if (draw->type == PSP_GFX_PSPGL_REPLAY_TRIANGLES) {
+            PspGfxPspgl_DrawColoredTriangles(
+                &sReplayCacheVertices[draw->first], draw->count, draw->textureId, draw->textureRef,
+                draw->textureEnv, draw->textureEnvColor, draw->wrapS, draw->wrapT, draw->alphaTest, draw->blend,
+                draw->premultiplied, draw->depthTest, draw->depthWrite, draw->fog,
+                draw->hasFogColor ? draw->fogColor : NULL, draw->fogStart, draw->fogEnd,
+                draw->hasProjection ? draw->projection : NULL, draw->projectionSerial, draw->pretransformed,
+                draw->pointFilter, draw->uiViewport);
+        } else if (draw->type == PSP_GFX_PSPGL_REPLAY_SPRITES) {
+            PspGfxPspgl_DrawColoredSprites(
+                &sReplayCacheVertices[draw->first], draw->count, draw->textureId, draw->textureRef,
+                draw->textureEnv, draw->textureEnvColor, draw->wrapS, draw->wrapT, draw->alphaTest, draw->blend,
+                draw->premultiplied, draw->depthTest, draw->depthWrite, draw->fog,
+                draw->hasFogColor ? draw->fogColor : NULL, draw->fogStart, draw->fogEnd,
+                draw->hasProjection ? draw->projection : NULL, draw->projectionSerial, draw->pretransformed,
+                draw->pointFilter, draw->uiViewport);
+        } else if (draw->type == PSP_GFX_PSPGL_REPLAY_SOLID_RECT) {
+            PspGfxPspgl_DrawSolidRect(draw->ulx, draw->uly, draw->lrx, draw->lry, draw->color, draw->blendRect,
+                                      draw->uiViewport);
+        }
+#if PSP_ORIGINAL_FOG
+        if (draw->type == PSP_GFX_PSPGL_REPLAY_FOG) {
+            PspGfxPspgl_DrawFogTriangles(&sReplayCacheFogVertices[draw->first], draw->count,
+                                         draw->hasProjection ? draw->projection : NULL, draw->projectionSerial,
+                                         draw->pretransformed, draw->depthTest, draw->uiViewport);
+        }
+#endif
+    }
+    sReplayCacheReplaying = 0;
+}
+
+void PspGfxPspgl_DrawReservedColoredTriangles(const PspGfxPspglVertexReservation* reservation, u32 vertexCount,
+                                              u32 textureId, PspGfxPspglTextureRef textureRef,
+                                              PspGfxPspglTextureEnv textureEnv, u32 textureEnvColor,
+                                              PspGfxPspglTextureWrap wrapS, PspGfxPspglTextureWrap wrapT, int alphaTest,
+                                              int blend, int premultiplied, int depthTest, int depthWrite, int fog,
+                                              const float* fogColor, float fogStart, float fogEnd,
+                                              const float* projectionMatrix, u32 projectionSerial, int pretransformed,
+                                              int pointFilter, int uiViewport) {
+    if ((reservation == NULL) || (reservation->vertices == NULL) || (vertexCount > reservation->capacity)) {
+        return;
+    }
+    psp_gfx_pspgl_replay_capture_colored(reservation->vertices, vertexCount, PSP_GFX_PSPGL_REPLAY_TRIANGLES,
+                                         textureId, textureRef, textureEnv, textureEnvColor, wrapS, wrapT, alphaTest,
+                                         blend, premultiplied, depthTest, depthWrite, fog, fogColor, fogStart, fogEnd,
+                                         projectionMatrix, projectionSerial, pretransformed, pointFilter, uiViewport);
+    psp_gfx_pspgl_draw_colored(reservation->vertices, vertexCount, GL_TRIANGLES, textureId, textureRef, textureEnv,
+                               textureEnvColor, wrapS, wrapT, alphaTest, blend, premultiplied, depthTest, depthWrite,
+                               fog, fogColor, fogStart, fogEnd, projectionMatrix, projectionSerial, pretransformed,
+                               pointFilter, reservation, uiViewport);
+}
+
+void PspGfxPspgl_DrawColoredSprites(const PspGfxPspglColorVertex* vertices, u32 vertexCount,
+    u32 textureId, PspGfxPspglTextureRef textureRef, PspGfxPspglTextureEnv textureEnv,
+    u32 textureEnvColor, PspGfxPspglTextureWrap wrapS, PspGfxPspglTextureWrap wrapT, int alphaTest,
+    int blend, int premultiplied, int depthTest, int depthWrite, int fog, const float* fogColor, float fogStart,
+    float fogEnd, const float* projectionMatrix, u32 projectionSerial, int pretransformed, int pointFilter,
+    int uiViewport
+) {
+    if ((vertices != NULL) && (vertexCount != 0)) {
+        psp_gfx_pspgl_replay_capture_colored(vertices, vertexCount, PSP_GFX_PSPGL_REPLAY_SPRITES, textureId,
+                                             textureRef, textureEnv, textureEnvColor, wrapS, wrapT, alphaTest, blend,
+                                             premultiplied, depthTest, depthWrite, fog, fogColor, fogStart, fogEnd,
+                                             projectionMatrix, projectionSerial, pretransformed, pointFilter,
+                                             uiViewport);
+    }
+    psp_gfx_pspgl_draw_colored(vertices, vertexCount, PSP_GFX_PSPGL_GL_SPRITES, textureId, textureRef,
+                               textureEnv, textureEnvColor, wrapS, wrapT, alphaTest, blend, premultiplied,
+                               depthTest, depthWrite, fog, fogColor, fogStart, fogEnd, projectionMatrix,
+                               projectionSerial, pretransformed, pointFilter, NULL, uiViewport);
+}
+
+void PspGfxPspgl_DrawSolidRect(float ulx, float uly, float lrx, float lry, u32 color, int blend, int uiViewport) {
+    PspGfxPspglColorVertex vertices[6];
+
+    psp_gfx_pspgl_replay_capture_solid_rect(ulx, uly, lrx, lry, color, blend, uiViewport);
+
+    vertices[0].u = 0.0f;
+    vertices[0].v = 0.0f;
+    vertices[0].color = color;
+    vertices[0].x = (ulx / 160.0f) - 1.0f;
+    vertices[0].y = 1.0f - (uly / 120.0f);
+    vertices[0].z = 0.0f;
+
+    vertices[1].u = 0.0f;
+    vertices[1].v = 0.0f;
+    vertices[1].color = color;
+    vertices[1].x = (lrx / 160.0f) - 1.0f;
+    vertices[1].y = 1.0f - (uly / 120.0f);
+    vertices[1].z = 0.0f;
+
+    vertices[2].u = 0.0f;
+    vertices[2].v = 0.0f;
+    vertices[2].color = color;
+    vertices[2].x = (lrx / 160.0f) - 1.0f;
+    vertices[2].y = 1.0f - (lry / 120.0f);
+    vertices[2].z = 0.0f;
+
+    vertices[3] = vertices[0];
+    vertices[4] = vertices[2];
+
+    vertices[5].u = 0.0f;
+    vertices[5].v = 0.0f;
+    vertices[5].color = color;
+    vertices[5].x = (ulx / 160.0f) - 1.0f;
+    vertices[5].y = 1.0f - (lry / 120.0f);
+    vertices[5].z = 0.0f;
+
+    PspProfiler_PhaseBegin(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+    psp_gfx_pspgl_select_viewport(uiViewport);
+    psp_gfx_pspgl_load_projection_identity();
+    psp_gfx_pspgl_texture_2d(0);
+    psp_gfx_pspgl_alpha_test(0);
+    psp_gfx_pspgl_depth_test(0);
+    psp_gfx_pspgl_depth_mask(GL_FALSE);
+    psp_gfx_pspgl_fog_disabled();
+    if (blend) {
+        psp_gfx_pspgl_blend(1);
+        psp_gfx_pspgl_blend_func(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    } else {
+        psp_gfx_pspgl_blend(0);
+    }
+    PspProfiler_PhaseEnd(PSP_PROFILE_PHASE_PSPGL_STATE_SETUP);
+
+    if (!psp_gfx_pspgl_draw_vbo_stream(vertices, ARRAY_COUNT(vertices), GL_TRIANGLES)) {
+        psp_gfx_pspgl_draw_client_arrays(vertices, ARRAY_COUNT(vertices), GL_TRIANGLES);
+    }
+}

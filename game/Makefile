@@ -1,0 +1,776 @@
+# PSP-only build for the Star Fox 64 port.
+#
+# Default target:
+#   make
+#   make psp
+#
+# Useful variants:
+#   make PSP_FULL=0 psp    # debug/bootstrap EBOOT only
+#   make bootstrap         # same, isolated under build/psp-bootstrap
+#   make PROFILE_PSP=1 psp # profiling-friendly ELF packaging
+#   make PSP_VME=1 psp # VME validation build
+
+-include .make_options
+
+MAKEFLAGS += --no-builtin-rules --no-print-directory
+.DEFAULT_GOAL := psp
+
+TARGET := starfox64
+VERSION ?= us
+REV ?= rev1
+PSP_GFX_BACKEND ?= unified
+ifneq ($(filter unified pspgl gu,$(PSP_GFX_BACKEND)),$(PSP_GFX_BACKEND))
+$(error PSP_GFX_BACKEND must be unified, pspgl or gu)
+endif
+PSP_GFX_HAS_GU := $(if $(filter gu unified,$(PSP_GFX_BACKEND)),1,0)
+PSP_GFX_HAS_PSPGL := $(if $(filter pspgl unified,$(PSP_GFX_BACKEND)),1,0)
+PSP_GFX_BACKEND_CFLAGS := -DPSP_GFX_BACKEND_PSPGL=$(PSP_GFX_HAS_PSPGL) -DPSP_GFX_BACKEND_GU=$(PSP_GFX_HAS_GU)
+ifneq ($(PSP_GFX_BACKEND),unified)
+PSP_GFX_BACKEND_CFLAGS += -DPSP_GFX_BACKEND_DIRECT_CALLS=1
+endif
+PSP_FULL ?= 1
+PROFILE_CENSUS ?= 0
+PROFILE_CENSUS_DISPATCH ?= 0
+ifeq ($(PROFILE_CENSUS_DISPATCH),1)
+ifneq ($(PROFILE_CENSUS),1)
+$(error PROFILE_CENSUS_DISPATCH requires PROFILE_CENSUS=1)
+endif
+endif
+PROFILE_PSP ?= 0
+PROFILE_PHASES ?= 0
+PROFILE_CAPTURE_FRAMES ?= 300
+PROFILE_FRAME_TRACE ?= 0
+PROFILE_FRAME_TRACE_FRAMES ?= 240
+PROFILE_COMPONENTS ?= 0
+PROFILE_TRIVIAL_REJECTS ?= 0
+PROFILE_HW_COUNTERS ?= 0
+PROFILE_HW_COUNTER_SCOPES ?= 0
+PROFILE_POOL_LOOKUP ?= 0
+ifneq ($(filter psp-profile-hw-counters,$(MAKECMDGOALS)),)
+override PROFILE_HW_COUNTERS := 1
+endif
+PSPGL_SWAP_INTERVAL ?= 0
+USE_LOCAL_PSPGL ?= 1
+PSP_LOG ?= 0
+PSP_TRACE ?= 0
+PSP_RENDERER_DIAGNOSTICS ?= 0
+PSP_ORIGINAL_FOG ?= 0
+ifeq ($(PSP_RENDERER_DIAGNOSTICS),1)
+PSP_LOG := 1
+endif
+PSP_AUDIO_PROFILE ?= 0
+PSP_VME ?= 0
+PSP_FPS_OVERLAY ?= 1
+PSP_NATIVE_COVERAGE_AB ?= 0
+NATIVE_COVERAGE_POLICY ?=
+NATIVE_CANDIDATES ?=
+ifeq ($(PSP_NATIVE_COVERAGE_AB),1)
+ifeq ($(strip $(NATIVE_COVERAGE_POLICY)),)
+$(error PSP_NATIVE_COVERAGE_AB=1 requires NATIVE_COVERAGE_POLICY)
+endif
+else ifneq ($(PSP_NATIVE_COVERAGE_AB),0)
+$(error PSP_NATIVE_COVERAGE_AB must be 0 or 1)
+endif
+ifneq ($(strip $(NATIVE_CANDIDATES)),)
+ifeq ($(strip $(NATIVE_COVERAGE_POLICY)),)
+$(error NATIVE_CANDIDATES requires NATIVE_COVERAGE_POLICY)
+endif
+ifneq ($(PSP_NATIVE_COVERAGE_AB),0)
+$(error NATIVE_CANDIDATES requires PSP_NATIVE_COVERAGE_AB=0)
+endif
+endif
+ifneq ($(strip $(NATIVE_COVERAGE_POLICY)),)
+ifneq ($(strip $(NATIVE_CANDIDATES)$(filter 1,$(PSP_NATIVE_COVERAGE_AB))),)
+NATIVE_COVERAGE_ARGS := --coverage-policy $(NATIVE_COVERAGE_POLICY) $(foreach asset,$(NATIVE_CANDIDATES),--candidate $(asset))
+else
+$(error NATIVE_COVERAGE_POLICY requires NATIVE_CANDIDATES or PSP_NATIVE_COVERAGE_AB=1)
+endif
+endif
+COLOR ?= 1
+VERBOSE ?= 0
+N_THREADS ?= $(shell nproc 2>/dev/null || echo 1)
+PYTHON ?= python3
+TOOLS ?= tools
+
+BASEROM := baserom.$(VERSION).$(REV).z64
+BASEROM_UNCOMPRESSED := baserom.$(VERSION).$(REV).uncompressed.z64
+
+COMPTOOL := $(TOOLS)/comptool.py
+COMPTOOL_DIR := baserom
+MIO0 := $(TOOLS)/mio0
+SPLAT ?= $(PYTHON) $(TOOLS)/splat/split.py
+SPLAT_YAML ?= $(TARGET).$(VERSION).$(REV).yaml
+TORCH := $(TOOLS)/Torch/cmake-build-release/torch
+CAT := cat
+
+PSP_CONFIG ?= psp-config
+PSP_FIXUP_IMPORTS ?= psp-fixup-imports
+PSP_PRXGEN ?= psp-prxgen
+MKSFOEX ?= mksfoex
+PACK_PBP ?= pack-pbp
+PSP_STRIP ?= psp-strip
+PSPGL_CONFIG ?= pspgl-config
+PSP_NM ?= psp-nm
+SHA256SUM ?= sha256sum
+DATE ?= date
+
+PSPSDK ?= $(shell $(PSP_CONFIG) --pspsdk-path 2>/dev/null)
+PSPDEV ?= $(shell $(PSP_CONFIG) --psp-prefix 2>/dev/null | sed 's,/psp$$,,')
+
+ifneq ($(PSP_AUDIO_PROFILE),0)
+ifneq ($(PSP_AUDIO_PROFILE),1)
+$(error PSP_AUDIO_PROFILE must be 0 or 1)
+endif
+endif
+ifneq ($(PSP_VME),0)
+ifneq ($(PSP_VME),1)
+$(error PSP_VME must be 0 or 1)
+endif
+endif
+ifeq ($(PSP_VME),1)
+override PSP_AUDIO_PROFILE := 1
+endif
+override PSP_AUDIO_VME := $(PSP_VME)
+override PSP_AUDIO_VME_VALIDATE := $(PSP_VME)
+override PSP_AUDIO_VME_BENCH := $(PSP_VME)
+ifneq ($(PSPGL_SWAP_INTERVAL),0)
+ifneq ($(PSPGL_SWAP_INTERVAL),1)
+$(error PSPGL_SWAP_INTERVAL must be 0 or 1)
+endif
+endif
+CC := psp-gcc
+OBJDUMP := psp-objdump
+OBJCOPY := psp-objcopy
+
+BUILD_DIR ?= build/psp/$(PSP_GFX_BACKEND)
+PSP_PROFILE_BUILD_ROOT ?= build/psp-profile/$(PSP_GFX_BACKEND)
+PSP_TITLE ?= Star Fox 64
+PSP_EBOOT_DIR ?= src/psp/EBOOT
+PSP_EBOOT_ICON ?= $(PSP_EBOOT_DIR)/ICON0.png
+PSP_EBOOT_ICON1 ?= NULL
+PSP_EBOOT_PIC0 ?= $(PSP_EBOOT_DIR)/PIC0.png
+PSP_EBOOT_SND0 ?= $(PSP_EBOOT_DIR)/SND0.at3
+PSP_EBOOT_PSAR ?= NULL
+
+PSP_EBOOT := $(BUILD_DIR)/EBOOT.PBP
+PSP_SFO := $(BUILD_DIR)/PARAM.SFO
+PSP_ELF := $(BUILD_DIR)/$(TARGET).psp.elf
+PSP_PRX := $(BUILD_DIR)/$(TARGET).psp.prx
+PSP_MAP := $(BUILD_DIR)/$(TARGET).psp.map
+PROFILE_METADATA := $(BUILD_DIR)/profile_build_metadata.txt
+PROFILE_BUILD_COMMANDS := $(BUILD_DIR)/PROFILE_BUILD_COMMANDS.txt
+PROFILE_SHA256SUMS := $(BUILD_DIR)/SHA256SUMS
+PROFILE_ARTIFACT_ROOT ?= artifacts
+QUEUE_TRACE_LOG ?= sf64_psp.log
+QUEUE_TRACE_QUEUES ?= 0x9917470 0x9974c14 0x9974ca4 0x9974c84
+PSP_LOAD_BASE ?= 0x08804000
+PSPGL_DIR ?= lib/pspgl
+LOCAL_PSPGL_LIB := $(PSPGL_DIR)/libGL.a
+
+PSP_LIBS ?= -lm -lpspdebug -lpspdisplay -lpspgu -lpspge -lpspctrl -lpspaudio -lpsppower
+ifeq ($(PSP_FULL),1)
+ifeq ($(wildcard $(PSPDEV)/psp/include/me-core-mapper/me-core.h),)
+$(error PSP Media Engine headers not found. Install psp-media-engine-custom-core)
+endif
+ifeq ($(wildcard $(PSPDEV)/psp/lib/libme-core.a),)
+$(error PSP Media Engine library not found. Install psp-media-engine-custom-core)
+endif
+PSP_LIBS := -lme-core -lpspsdk $(PSP_LIBS)
+endif
+
+ifeq ($(COLOR),1)
+NO_COL := \033[0m
+GREEN := \033[0;32m
+BLUE := \033[0;34m
+YELLOW := \033[0;33m
+endif
+
+ifeq ($(VERBOSE),0)
+V := @
+endif
+
+define print
+	@printf "$(GREEN)$(1) $(YELLOW)$(2)$(GREEN) -> $(BLUE)$(3)$(NO_COL)\n"
+endef
+
+COMMON_DEFINES := -D_MIPS_SZLONG=32
+GBI_DEFINES := -DF3DEX_GBI
+RELEASE_DEFINES := -DNDEBUG
+VERSION_DEFINES := -DVERSION_US=1
+PORT_DEFINES := -DLANGUAGE_C -D_LANGUAGE_C -DBUILD_VERSION=VERSION_H -DTARGET_PSP=1 -D_PSP=1
+PORT_DEFINES += -DNON_MATCHING -DAVOID_UB -DCOMPILER_GCC
+
+IINC := -Iinclude -Ibin/$(VERSION).$(REV) -I.
+IINC += -Ilib/ultralib/include -Ilib/ultralib/include/PR -Ilib/ultralib/include/ido
+ifeq ($(PSP_GFX_HAS_PSPGL),1)
+ifeq ($(USE_LOCAL_PSPGL),1)
+IINC += -I$(PSPGL_DIR)
+endif
+endif
+IINC += -I$(PSPDEV)/psp/include -I$(PSPSDK)/include
+IINC += -Ilib/n64psp/include
+
+PSP_WARNINGS := -Wall -Wextra -Wimplicit-fallthrough -Wno-unknown-pragmas -Wno-missing-braces
+PSP_WARNINGS += -Wno-sign-compare -Wno-uninitialized
+
+QUIET_DECOMP ?= 1
+
+define source_warning_flags
+$(if $(filter src/psp/%,$<),$(PSP_WARNINGS),$(if $(filter 1,$(QUIET_DECOMP)),-w,$(PSP_WARNINGS)))
+endef
+
+PSP_OPTFLAGS ?= -O2 # -ffast-math
+SF64_GIT_SHA := $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+N64PSP_GIT_SHA := $(shell git -C lib/n64psp rev-parse HEAD 2>/dev/null || echo unknown)
+SF64_GIT_DIRTY := $(shell test -z "$$(git status --porcelain 2>/dev/null)" && echo clean || echo dirty)
+N64PSP_GIT_DIRTY := $(shell test -z "$$(git -C lib/n64psp status --porcelain 2>/dev/null)" && echo clean || echo dirty)
+ifeq ($(PSP_GFX_HAS_PSPGL),1)
+PSPGL_GIT_SHA := $(shell git -C $(PSPGL_DIR) rev-parse HEAD 2>/dev/null || echo unknown)
+PSPGL_GIT_DIRTY := $(shell test -z "$$(git -C $(PSPGL_DIR) status --porcelain 2>/dev/null)" && echo clean || echo dirty)
+PSPGL_SOURCE_MODE := $(if $(filter 1,$(USE_LOCAL_PSPGL)),local,system)
+PSPGL_PROFILE_GIT_SHA := $(if $(filter 1,$(USE_LOCAL_PSPGL)),$(PSPGL_GIT_SHA),system)
+PSPGL_PROFILE_GIT_DIRTY := $(if $(filter 1,$(USE_LOCAL_PSPGL)),$(PSPGL_GIT_DIRTY),system)
+else
+PSPGL_GIT_SHA := disabled
+PSPGL_GIT_DIRTY := disabled
+PSPGL_SOURCE_MODE := disabled
+PSPGL_PROFILE_GIT_SHA := disabled
+PSPGL_PROFILE_GIT_DIRTY := disabled
+endif
+PSP_COMPILER_VERSION := $(shell $(CC) --version 2>/dev/null | sed -n '1p' | sed 's/"/\\"/g; s/[[:space:]]\+/_/g')
+
+ifeq ($(PROFILE_FRAME_TRACE),1)
+ifneq ($(PROFILE_PHASES),1)
+$(error PROFILE_FRAME_TRACE=1 requires PROFILE_PHASES=1.)
+endif
+ifeq ($(PROFILE_FRAME_TRACE_FRAMES),0)
+$(error PROFILE_FRAME_TRACE_FRAMES must be at least 1.)
+endif
+ifneq ($(shell test "$(PROFILE_FRAME_TRACE_FRAMES)" -le 3600 2>/dev/null && echo ok),ok)
+$(error PROFILE_FRAME_TRACE_FRAMES=$(PROFILE_FRAME_TRACE_FRAMES) is unreasonable; use 1..3600.)
+endif
+endif
+ifeq ($(PROFILE_COMPONENTS),1)
+ifneq ($(PROFILE_PHASES),1)
+$(error PROFILE_COMPONENTS=1 requires PROFILE_PHASES=1.)
+endif
+endif
+ifeq ($(PROFILE_TRIVIAL_REJECTS),1)
+ifneq ($(PROFILE_PHASES),1)
+$(error PROFILE_TRIVIAL_REJECTS=1 requires PROFILE_PHASES=1.)
+endif
+endif
+ifneq ($(PROFILE_HW_COUNTERS),0)
+ifneq ($(PROFILE_HW_COUNTERS),1)
+$(error PROFILE_HW_COUNTERS must be 0 or 1)
+endif
+endif
+ifeq ($(PROFILE_HW_COUNTER_SCOPES),1)
+ifneq ($(PROFILE_HW_COUNTERS),1)
+$(error PROFILE_HW_COUNTER_SCOPES=1 requires PROFILE_HW_COUNTERS=1.)
+endif
+endif
+ifeq ($(PROFILE_PSP),1)
+ifeq ($(PROFILE_PHASES),1)
+PSP_PROFILE_MODE := combined
+else
+PSP_PROFILE_MODE := gprof
+endif
+else ifeq ($(PROFILE_PHASES),1)
+PSP_PROFILE_MODE := phases
+else
+PSP_PROFILE_MODE := release
+endif
+
+# Counter captures reuse the release renderer and the release n64psp archives, so
+# PSP_PROFILE_MODE stays "release"; only the reported label records the capture.
+PSP_PROFILE_LABEL := $(PSP_PROFILE_MODE)$(if $(filter 1,$(PROFILE_HW_COUNTERS)),+hw-counters,)
+
+ifeq ($(filter 1,$(PROFILE_PSP) $(PROFILE_PHASES) $(PROFILE_HW_COUNTERS)),)
+PROFILE_OUTPUTS :=
+else
+PROFILE_OUTPUTS := $(PROFILE_METADATA) $(PROFILE_BUILD_COMMANDS) $(PROFILE_SHA256SUMS)
+endif
+
+CFLAGS := -std=gnu89 -G0 -DPSP -D__PSP__ -D_PSP_FW_VERSION=600 
+CFLAGS += $(PSP_OPTFLAGS) -g3
+CFLAGS += $(PSP_GFX_BACKEND_CFLAGS)
+CFLAGS += -fno-builtin -fno-common -fno-strict-aliasing
+CFLAGS += -fwrapv -funsigned-char
+CFLAGS += -ffunction-sections -fdata-sections
+CFLAGS += -fno-exceptions -fno-unwind-tables
+CFLAGS += -fno-asynchronous-unwind-tables -fno-ident
+CFLAGS += -DPROFILE_CENSUS=$(PROFILE_CENSUS) -DPROFILE_CENSUS_DISPATCH=$(PROFILE_CENSUS_DISPATCH)
+CFLAGS += -DPSP_FPS_OVERLAY=$(PSP_FPS_OVERLAY)
+CFLAGS += -DPSP_NATIVE_COVERAGE_AB=$(PSP_NATIVE_COVERAGE_AB)
+CFLAGS += -DPSP_AUDIO=1
+CFLAGS += -DPSP_AUDIO_PROFILE=$(PSP_AUDIO_PROFILE)
+CFLAGS += -DPSP_AUDIO_VME=$(PSP_AUDIO_VME)
+CFLAGS += -DPSP_VME=$(PSP_VME)
+CFLAGS += -DPSP_AUDIO_VME_VALIDATE=$(PSP_AUDIO_VME_VALIDATE)
+CFLAGS += -DPSP_AUDIO_VME_BENCH=$(PSP_AUDIO_VME_BENCH)
+CFLAGS += -DPROFILE_GPROF=$(if $(filter 1,$(PROFILE_PSP)),1,0)
+CFLAGS += -DPROFILE_PHASES=$(if $(filter 1,$(PROFILE_PHASES)),1,0)
+CFLAGS += -DPROFILE_CAPTURE_FRAMES=$(PROFILE_CAPTURE_FRAMES)
+CFLAGS += -DPROFILE_FRAME_TRACE=$(if $(filter 1,$(PROFILE_FRAME_TRACE)),1,0)
+CFLAGS += -DPROFILE_FRAME_TRACE_FRAMES=$(PROFILE_FRAME_TRACE_FRAMES)
+CFLAGS += -DPROFILE_COMPONENTS=$(if $(filter 1,$(PROFILE_COMPONENTS)),1,0)
+CFLAGS += -DPROFILE_TRIVIAL_REJECTS=$(if $(filter 1,$(PROFILE_TRIVIAL_REJECTS)),1,0)
+CFLAGS += -DPROFILE_HW_COUNTERS=$(if $(filter 1,$(PROFILE_HW_COUNTERS)),1,0)
+CFLAGS += -DPROFILE_HW_COUNTER_SCOPES=$(if $(filter 1,$(PROFILE_HW_COUNTER_SCOPES)),1,0)
+CFLAGS += -DPROFILE_POOL_LOOKUP=$(if $(filter 1,$(PROFILE_POOL_LOOKUP)),1,0)
+CFLAGS += -DPSPGL_SWAP_INTERVAL=$(if $(filter 1,$(PSPGL_SWAP_INTERVAL)),1,0)
+CFLAGS += -DPSP_ORIGINAL_FOG=$(if $(filter 1,$(PSP_ORIGINAL_FOG)),1,0)
+CFLAGS += '-DSF64_GIT_SHA="$(SF64_GIT_SHA)"'
+CFLAGS += '-DN64PSP_GIT_SHA="$(N64PSP_GIT_SHA)"'
+# Only counter captures record tree cleanliness in the binary; keeping these out
+# of other builds avoids a full rebuild every time the tree flips clean/dirty.
+ifeq ($(PROFILE_HW_COUNTERS),1)
+CFLAGS += '-DSF64_GIT_DIRTY="$(SF64_GIT_DIRTY)"'
+CFLAGS += '-DN64PSP_GIT_DIRTY="$(N64PSP_GIT_DIRTY)"'
+endif
+CFLAGS += '-DPSPGL_GIT_SHA="$(PSPGL_PROFILE_GIT_SHA)"'
+CFLAGS += '-DPSPGL_GIT_DIRTY="$(PSPGL_PROFILE_GIT_DIRTY)"'
+CFLAGS += '-DPSPGL_SOURCE_MODE="$(PSPGL_SOURCE_MODE)"'
+CFLAGS += '-DPSP_GFX_BACKEND_NAME="$(PSP_GFX_BACKEND)"'
+CFLAGS += '-DBUILD_COMPILER="$(PSP_COMPILER_VERSION)"'
+CFLAGS += '-DBUILD_OPT_FLAGS="$(PSP_OPTFLAGS)"'
+CFLAGS += $(VERSION_DEFINES) $(COMMON_DEFINES) $(RELEASE_DEFINES)
+CFLAGS += $(GBI_DEFINES) $(PORT_DEFINES) $(IINC)
+
+ifeq ($(PSP_FULL),1)
+CFLAGS += -DPSP_FULL=1
+endif
+ifeq ($(PSP_LOG),1)
+CFLAGS += -DPSP_LOG_ENABLED=1
+endif
+ifeq ($(PSP_TRACE),1)
+CFLAGS += -DPSP_TRACE_ENABLED=1
+endif
+ifeq ($(PSP_RENDERER_DIAGNOSTICS),1)
+CFLAGS += -DPSP_RENDERER_DIAGNOSTICS=1
+endif
+ifeq ($(PSP_GFX_HAS_PSPGL),1)
+ifeq ($(USE_LOCAL_PSPGL),1)
+PSPGL_HEADER := $(firstword $(wildcard $(PSPGL_DIR)/GLES/egl.h) $(wildcard $(PSPGL_DIR)/GL/gl.h))
+ifeq ($(PSPGL_HEADER),)
+$(error Local PSPGL headers not found under $(PSPGL_DIR). Update lib/pspgl or build without USE_LOCAL_PSPGL=1.)
+endif
+PSPGL_CFLAGS :=
+PSPGL_LIBS := $(LOCAL_PSPGL_LIB) -lpspvfpu
+PSPGL_BUILD_DEPS := $(LOCAL_PSPGL_LIB)
+else
+PSPGL_CONFIG_PATH := $(shell command -v $(PSPGL_CONFIG) 2>/dev/null)
+ifneq ($(PSPGL_CONFIG_PATH),)
+PSPGL_CFLAGS := $(shell $(PSPGL_CONFIG) --cflags)
+PSPGL_LIBS := $(shell $(PSPGL_CONFIG) --libs)
+else
+PSPGL_HEADER := $(firstword $(wildcard $(PSPDEV)/psp/include/GLES/egl.h) $(wildcard $(PSPDEV)/psp/include/GL/gl.h))
+PSPGL_LIBRARY := $(firstword $(wildcard $(PSPDEV)/psp/lib/libGL.a))
+ifeq ($(PSPGL_HEADER),)
+$(error PSPGL not found. Install PSPGL before building the PSP port.)
+endif
+ifeq ($(PSPGL_LIBRARY),)
+$(error PSPGL not found. Install PSPGL before building the PSP port.)
+endif
+PSPGL_CFLAGS :=
+PSPGL_LIBS := -lGL -lpspvfpu
+endif
+PSPGL_BUILD_DEPS :=
+endif
+else
+PSPGL_CFLAGS :=
+PSPGL_LIBS :=
+PSPGL_BUILD_DEPS :=
+endif
+CFLAGS += $(PSPGL_CFLAGS)
+PSP_LIBS := $(PSPGL_LIBS) $(PSP_LIBS)
+
+N64PSP_DIR := lib/n64psp
+N64PSP_BUILD_PSP := build-psp-$(PSP_PROFILE_MODE)
+
+N64PSP_BUILD_STAMP := $(N64PSP_DIR)/$(N64PSP_BUILD_PSP)/.sf64-n64psp-build.stamp
+
+N64PSP_PSP_ARCHIVES := \
+	$(N64PSP_DIR)/$(N64PSP_BUILD_PSP)/libn64psp_runtime.a \
+	$(N64PSP_DIR)/$(N64PSP_BUILD_PSP)/libn64psp_trace_backend.a \
+	$(N64PSP_DIR)/$(N64PSP_BUILD_PSP)/libn64psp_platform_psp.a \
+	$(N64PSP_DIR)/$(N64PSP_BUILD_PSP)/libn64psp_math.a
+
+N64PSP_BUILD_TARGETS := \
+	$(N64PSP_BUILD_PSP)/libn64psp_runtime.a \
+	$(N64PSP_BUILD_PSP)/libn64psp_trace_backend.a \
+	$(N64PSP_BUILD_PSP)/libn64psp_platform_psp.a \
+	$(N64PSP_BUILD_PSP)/libn64psp_math.a
+
+LDFLAGS := -L$(PSPDEV)/psp/lib -L$(PSPSDK)/lib
+PSP_MAP_FLAG := -Wl,-Map,$(PSP_MAP)
+LDFLAGS += $(PSP_MAP_FLAG) -Wl,-zmax-page-size=128
+
+ifeq ($(PROFILE_PSP),1)
+CFLAGS += -pg -g -fno-omit-frame-pointer -fno-optimize-sibling-calls
+LDFLAGS += -pg -g
+endif
+
+PSP_LINK_SCRIPT := $(PSPSDK)/lib/linkfile.prx
+PSP_BASE_LINK_SCRIPT :=
+PSP_LAYOUT_CONTROL_ELF :=
+PSP_LAYOUT_CONTROL_MAP :=
+PSP_LAYOUT_DEPS :=
+ifneq ($(filter gu unified,$(PSP_GFX_BACKEND)),)
+ifeq ($(PSP_FULL),1)
+ifeq ($(filter 1,$(PROFILE_PSP) $(PROFILE_PHASES) $(PROFILE_HW_COUNTERS) $(PROFILE_POOL_LOOKUP) $(PSP_TRACE) $(PSP_RENDERER_DIAGNOSTICS) $(PROFILE_CENSUS_DISPATCH)),)
+PSP_LAYOUT_PLAN := $(if $(filter unified,$(PSP_GFX_BACKEND)),src/psp/gfx/gfx_psp_layout.json,src/psp/gfx/gfx_psp_layout_gu.json)
+PSP_LAYOUT_BASE_PLAN := $(PSP_LAYOUT_PLAN)
+PSP_LAYOUT_PLAN := $(BUILD_DIR)/gfx-layout-aquas.json
+PSP_LAYOUT_TOOL := $(N64PSP_DIR)/scripts/link_layout.py
+PSP_LAYOUT_RELOCATIONS := src/psp/gfx/gfx_psp_layout_relocations.json
+PSP_LAYOUT_RELOCATION_TOOL := src/psp/gfx/native_layout_relocation.py
+PSP_BASE_LINK_SCRIPT := $(BUILD_DIR)/gfx-layout-base.prx.ld
+PSP_LAYOUT_CONTROL_ELF := $(BUILD_DIR)/$(TARGET).layout-control.elf
+PSP_LAYOUT_CONTROL_MAP := $(BUILD_DIR)/$(TARGET).layout-control.map
+PSP_LINK_SCRIPT := $(BUILD_DIR)/gfx-layout-production.prx.ld
+PSP_LAYOUT_DEPS := $(PSP_LINK_SCRIPT) $(PSP_BASE_LINK_SCRIPT) $(PSP_LAYOUT_PLAN) \
+	$(PSP_LAYOUT_RELOCATIONS) $(PSP_LAYOUT_TOOL) $(PSP_LAYOUT_RELOCATION_TOOL)
+endif
+endif
+endif
+
+PSP_LINK_FLAG = -Wl,-q,-T$(PSP_LINK_SCRIPT)
+PSP_GFX_GU_SCRATCHPAD := $(if $(PSP_LAYOUT_DEPS),1,0)
+CFLAGS += -DPSP_GFX_GU_SCRATCHPAD=$(PSP_GFX_GU_SCRATCHPAD)
+LDFLAGS += -specs=$(PSPSDK)/lib/prxspecs \
+           $(PSP_LINK_FLAG) \
+           $(PSPSDK)/lib/prxexports.o
+ifeq ($(PSP_FULL),1)
+LDFLAGS += -Wl,-u,sf64PspMeKcallImport
+endif
+
+include src/psp/sources.mk
+
+ifeq ($(PSP_FULL),1)
+C_FILES := $(PSP_GAME_C_FILES)
+else
+C_FILES := $(PSP_BOOTSTRAP_C_FILES)
+endif
+
+O_FILES := $(patsubst %.c,$(BUILD_DIR)/%.o,$(C_FILES))
+ifeq ($(PSP_FULL),1)
+O_FILES += $(patsubst %.S,$(BUILD_DIR)/%.o,$(PSP_GAME_S_FILES))
+endif
+O_FILES += $(N64PSP_PSP_ARCHIVES)
+DEP_FILES := $(patsubst %.o,%.d,$(filter %.o,$(O_FILES)))
+ASSET_C_FILES := $(filter src/assets/%,$(PSP_GAME_C_FILES))
+ASSET_PREFLIGHT_STAMP := $(BUILD_DIR)/asset-preflight.stamp
+COMPILE_FLAGS_STAMP := $(BUILD_DIR)/compile-flags.stamp
+
+check-python-deps:
+	@$(PYTHON) -c "import yaml" || (echo "Missing Python deps. Run: make python-deps  or  make venv" && false)
+
+tools-init:
+	git submodule update --init --recursive
+	$(MAKE) -s -C $(TOOLS)
+	$(RM) -f torch.hash.yml
+
+init:
+	$(MAKE) check-python-deps
+	$(MAKE) tools-init
+	$(MAKE) clean-generated
+	$(MAKE) decompress
+	$(MAKE) extract -j $(N_THREADS)
+	$(MAKE) assets -j $(N_THREADS)
+	$(MAKE) psp
+
+decompress: $(BASEROM) $(MIO0)
+	@echo "Decompressing ROM..."
+	$(V)$(PYTHON) $(COMPTOOL) $(DECOMPRESS_OPT) -dse $(COMPTOOL_DIR) -m $(MIO0) $(BASEROM) $(BASEROM_UNCOMPRESSED)
+
+extract: $(BASEROM_UNCOMPRESSED)
+	$(RM) -r asm/$(VERSION)/$(REV) bin/$(VERSION)/$(REV)
+	@mkdir -p asm bin
+	@echo "Unifying yamls..."
+	$(V)$(CAT) yamls/$(VERSION)/$(REV)/header.yaml yamls/$(VERSION)/$(REV)/main.yaml yamls/$(VERSION)/$(REV)/assets.yaml yamls/$(VERSION)/$(REV)/overlays.yaml > $(SPLAT_YAML)
+	@echo "Extracting..."
+	$(V)$(SPLAT) $(SPLAT_YAML)
+
+assets: $(BASEROM_UNCOMPRESSED)
+	@echo "Extracting assets from ROM..."
+	$(V)$(TORCH) code $(BASEROM_UNCOMPRESSED)
+	$(V)$(TORCH) header $(BASEROM_UNCOMPRESSED)
+	$(V)$(TORCH) modding export $(BASEROM_UNCOMPRESSED)
+
+clean-generated:
+	$(RM) -f torch.hash.yml $(SPLAT_YAML)
+	$(RM) -r asm/$(VERSION)/$(REV)
+	$(RM) -r bin/$(VERSION)/$(REV)
+	$(RM) -r src/assets
+	$(RM) -r include/assets
+
+all: psp
+
+psp: $(PSP_EBOOT) $(PROFILE_OUTPUTS)
+	@printf "$(BLUE)$(PSP_EBOOT)$(NO_COL): $(GREEN)OK$(NO_COL)\n"
+
+bootstrap:
+	$(MAKE) PSP_FULL=0 PSP_GFX_BACKEND=$(PSP_GFX_BACKEND) BUILD_DIR=build/psp-bootstrap/$(PSP_GFX_BACKEND) psp
+
+psp-profile-gprof psp-profile-phases psp-profile-combined psp-profile-builds psp-profile-artifacts: PSP_FPS_OVERLAY=0
+psp-profile-gprof psp-profile-phases psp-profile-combined psp-profile-builds psp-profile-artifacts: PSP_LOG=0
+psp-profile-gprof psp-profile-phases psp-profile-combined psp-profile-builds psp-profile-artifacts: PSP_TRACE=0
+psp-profile-gprof psp-profile-phases psp-profile-combined psp-profile-builds psp-profile-artifacts: PSP_RENDERER_DIAGNOSTICS=0
+
+psp-profile-gprof:
+	$(MAKE) PROFILE_PSP=1 PROFILE_PHASES=0 PSP_GFX_BACKEND=$(PSP_GFX_BACKEND) BUILD_DIR=$(PSP_PROFILE_BUILD_ROOT)/gprof PSP_FPS_OVERLAY=$(PSP_FPS_OVERLAY) PSP_LOG=$(PSP_LOG) PSP_TRACE=$(PSP_TRACE) PSP_RENDERER_DIAGNOSTICS=$(PSP_RENDERER_DIAGNOSTICS) psp
+
+psp-profile-phases:
+	$(MAKE) PROFILE_PSP=0 PROFILE_PHASES=1 PSP_GFX_BACKEND=$(PSP_GFX_BACKEND) BUILD_DIR=$(PSP_PROFILE_BUILD_ROOT)/phases PSP_FPS_OVERLAY=$(PSP_FPS_OVERLAY) PSP_LOG=$(PSP_LOG) PSP_TRACE=$(PSP_TRACE) PSP_RENDERER_DIAGNOSTICS=$(PSP_RENDERER_DIAGNOSTICS) psp
+
+psp-profile-combined:
+	$(MAKE) PROFILE_PSP=1 PROFILE_PHASES=1 PSP_GFX_BACKEND=$(PSP_GFX_BACKEND) BUILD_DIR=$(PSP_PROFILE_BUILD_ROOT)/combined PSP_FPS_OVERLAY=$(PSP_FPS_OVERLAY) PSP_LOG=$(PSP_LOG) PSP_TRACE=$(PSP_TRACE) PSP_RENDERER_DIAGNOSTICS=$(PSP_RENDERER_DIAGNOSTICS) psp
+
+# Hardware-counter capture build (PSP_Hardware_Audit.md, Primary Finding 1).
+# Deliberately keeps phase profiling, the FPS overlay and renderer diagnostics
+# off so the capture measures the release renderer, not the instrumentation.
+psp-profile-hw-counters: PSP_FPS_OVERLAY=0
+psp-profile-hw-counters: PSP_LOG=0
+psp-profile-hw-counters: PSP_TRACE=0
+psp-profile-hw-counters: PSP_RENDERER_DIAGNOSTICS=0
+psp-profile-hw-counters:
+	$(MAKE) PROFILE_PSP=0 PROFILE_PHASES=0 PROFILE_COMPONENTS=0 PROFILE_HW_COUNTERS=1 PROFILE_HW_COUNTER_SCOPES=$(PROFILE_HW_COUNTER_SCOPES) PSP_GFX_BACKEND=$(PSP_GFX_BACKEND) BUILD_DIR=$(PSP_PROFILE_BUILD_ROOT)/hw-counters PSP_FPS_OVERLAY=$(PSP_FPS_OVERLAY) PSP_LOG=$(PSP_LOG) PSP_TRACE=$(PSP_TRACE) PSP_RENDERER_DIAGNOSTICS=$(PSP_RENDERER_DIAGNOSTICS) PSP_VME=$(PSP_VME) PSPGL_SWAP_INTERVAL=$(PSPGL_SWAP_INTERVAL) USE_LOCAL_PSPGL=$(USE_LOCAL_PSPGL) psp
+
+psp-profile-builds: psp-profile-gprof psp-profile-phases
+
+psp-profile-artifacts: psp-profile-builds
+	@set -eu; \
+	stamp="$$( $(DATE) -u +%Y%m%dT%H%M%SZ )"; \
+	dest="$(PROFILE_ARTIFACT_ROOT)/psp-profile-$(PSP_GFX_BACKEND)-$$stamp"; \
+	mkdir -p "$$dest/builds/gprof" "$$dest/builds/phases" "$$dest/raw" "$$dest/reports"; \
+	cp -f $(PSP_PROFILE_BUILD_ROOT)/gprof/EBOOT.PBP $(PSP_PROFILE_BUILD_ROOT)/gprof/$(TARGET).psp.elf $(PSP_PROFILE_BUILD_ROOT)/gprof/$(TARGET).psp.map $(PSP_PROFILE_BUILD_ROOT)/gprof/profile_build_metadata.txt $(PSP_PROFILE_BUILD_ROOT)/gprof/PROFILE_BUILD_COMMANDS.txt $(PSP_PROFILE_BUILD_ROOT)/gprof/SHA256SUMS "$$dest/builds/gprof/"; \
+	cp -f $(PSP_PROFILE_BUILD_ROOT)/phases/EBOOT.PBP $(PSP_PROFILE_BUILD_ROOT)/phases/$(TARGET).psp.elf $(PSP_PROFILE_BUILD_ROOT)/phases/$(TARGET).psp.map $(PSP_PROFILE_BUILD_ROOT)/phases/profile_build_metadata.txt $(PSP_PROFILE_BUILD_ROOT)/phases/PROFILE_BUILD_COMMANDS.txt $(PSP_PROFILE_BUILD_ROOT)/phases/SHA256SUMS "$$dest/builds/phases/"; \
+	( cd "$$dest" && $(SHA256SUM) builds/gprof/* builds/phases/* > SHA256SUMS ); \
+	printf '%s\n' "$$dest"
+
+psp-profile-report:
+	$(PYTHON) tools/psp_profile_report.py "$(ELF)" "$(GMON)" "$(OUT)"
+
+preflight:
+ifeq ($(PSP_FULL),1)
+	$(V)$(PYTHON) tools/psp_validate_assets.py
+endif
+
+ifeq ($(PSP_FULL),1)
+$(PSP_ELF): $(ASSET_PREFLIGHT_STAMP)
+
+$(ASSET_PREFLIGHT_STAMP): tools/psp_validate_assets.py $(ASSET_C_FILES) include/sf64object.h include/sf64event.h
+	@mkdir -p $(dir $@)
+	$(V)$(PYTHON) tools/psp_validate_assets.py
+	$(V)touch $@
+endif
+
+$(MIO0):
+	$(MAKE) -s -C $(TOOLS)
+
+$(PSP_EBOOT): $(PSP_ELF) $(PSP_SFO)
+	$(call print,Packaging PSP EBOOT:,$<,$@)
+	$(V)$(PSP_PRXGEN) $(PSP_ELF) $(PSP_PRX)
+	$(V)$(PACK_PBP) $@ $(PSP_SFO) $(PSP_EBOOT_ICON) $(PSP_EBOOT_ICON1) NULL $(PSP_EBOOT_PIC0) $(PSP_EBOOT_SND0) $(PSP_PRX) $(PSP_EBOOT_PSAR)
+
+$(PROFILE_METADATA): $(PSP_EBOOT) $(PSP_ELF) $(PSP_MAP) Makefile
+	@mkdir -p $(dir $@)
+	$(call print,Writing profile metadata:,$(PSP_PROFILE_MODE),$@)
+	$(V){ \
+		printf 'profile_mode=%s\n' '$(PSP_PROFILE_LABEL)'; \
+		printf 'renderer_backend=%s\n' '$(PSP_GFX_BACKEND)'; \
+		printf 'build_id=%s-%s-%s-%s-sf64_%s-n64psp_%s\n' '$(PSP_PROFILE_LABEL)' '$(PSP_GFX_BACKEND)' '$(SF64_GIT_SHA)' '$(N64PSP_GIT_SHA)' '$(SF64_GIT_DIRTY)' '$(N64PSP_GIT_DIRTY)'; \
+		printf 'sf64_commit=%s\n' '$(SF64_GIT_SHA)'; \
+		printf 'sf64_worktree=%s\n' '$(SF64_GIT_DIRTY)'; \
+		printf 'n64psp_commit=%s\n' '$(N64PSP_GIT_SHA)'; \
+		printf 'n64psp_worktree=%s\n' '$(N64PSP_GIT_DIRTY)'; \
+		printf 'pspgl_source=%s\n' '$(PSPGL_SOURCE_MODE)'; \
+		printf 'pspgl_commit=%s\n' '$(if $(filter 1,$(USE_LOCAL_PSPGL)),$(PSPGL_GIT_SHA),system)'; \
+		printf 'pspgl_worktree=%s\n' '$(if $(filter 1,$(USE_LOCAL_PSPGL)),$(PSPGL_GIT_DIRTY),system)'; \
+		printf 'compiler=%s\n' '$(PSP_COMPILER_VERSION)'; \
+		printf 'cflags=%s\n' '$(CFLAGS)'; \
+		printf 'ldflags=%s\n' '$(LDFLAGS)'; \
+		printf 'psp_libs=%s\n' '$(PSP_LIBS)'; \
+		printf 'n64psp_build_dir=%s\n' '$(N64PSP_BUILD_PSP)'; \
+		printf 'PROFILE_PSP=%s\n' '$(PROFILE_PSP)'; \
+		printf 'PROFILE_PHASES=%s\n' '$(PROFILE_PHASES)'; \
+		printf 'PROFILE_CAPTURE_FRAMES=%s\n' '$(PROFILE_CAPTURE_FRAMES)'; \
+		printf 'PROFILE_FRAME_TRACE=%s\n' '$(PROFILE_FRAME_TRACE)'; \
+		printf 'PROFILE_FRAME_TRACE_FRAMES=%s\n' '$(PROFILE_FRAME_TRACE_FRAMES)'; \
+		printf 'PROFILE_COMPONENTS=%s\n' '$(PROFILE_COMPONENTS)'; \
+		printf 'PROFILE_TRIVIAL_REJECTS=%s\n' '$(PROFILE_TRIVIAL_REJECTS)'; \
+		printf 'PROFILE_HW_COUNTERS=%s\n' '$(PROFILE_HW_COUNTERS)'; \
+		printf 'PROFILE_HW_COUNTER_SCOPES=%s\n' '$(PROFILE_HW_COUNTER_SCOPES)'; \
+		printf 'PROFILE_POOL_LOOKUP=%s\n' '$(PROFILE_POOL_LOOKUP)'; \
+		printf 'USE_LOCAL_PSPGL=%s\n' '$(USE_LOCAL_PSPGL)'; \
+		printf 'PSPGL_SWAP_INTERVAL=%s\n' '$(PSPGL_SWAP_INTERVAL)'; \
+		printf 'audio_runtime_default=off\n'; \
+		printf 'PSP_VME=%s\n' '$(PSP_VME)'; \
+		printf 'PSP_FPS_OVERLAY=%s\n' '$(PSP_FPS_OVERLAY)'; \
+		printf 'PSP_LOG=%s\n' '$(PSP_LOG)'; \
+		printf 'PSP_TRACE=%s\n' '$(PSP_TRACE)'; \
+		printf 'PSP_RENDERER_DIAGNOSTICS=%s\n' '$(PSP_RENDERER_DIAGNOSTICS)'; \
+		printf 'cpu_clock_runtime=recorded in profile-NNN.txt on PSP\n'; \
+		printf 'bus_clock_runtime=recorded in profile-NNN.txt on PSP\n'; \
+		printf 'build_command=make %s PSP_GFX_BACKEND=%s BUILD_DIR=%s PROFILE_PSP=%s PROFILE_PHASES=%s PROFILE_CAPTURE_FRAMES=%s PROFILE_FRAME_TRACE=%s PROFILE_FRAME_TRACE_FRAMES=%s PROFILE_COMPONENTS=%s PROFILE_TRIVIAL_REJECTS=%s PROFILE_HW_COUNTERS=$(PROFILE_HW_COUNTERS) PROFILE_HW_COUNTER_SCOPES=$(PROFILE_HW_COUNTER_SCOPES) PROFILE_POOL_LOOKUP=$(PROFILE_POOL_LOOKUP) USE_LOCAL_PSPGL=%s PSPGL_SWAP_INTERVAL=%s PSP_VME=%s PSP_FPS_OVERLAY=%s PSP_LOG=%s PSP_TRACE=%s PSP_RENDERER_DIAGNOSTICS=%s psp\n' '$(MAKECMDGOALS)' '$(PSP_GFX_BACKEND)' '$(BUILD_DIR)' '$(PROFILE_PSP)' '$(PROFILE_PHASES)' '$(PROFILE_CAPTURE_FRAMES)' '$(PROFILE_FRAME_TRACE)' '$(PROFILE_FRAME_TRACE_FRAMES)' '$(PROFILE_COMPONENTS)' '$(PROFILE_TRIVIAL_REJECTS)' '$(PROFILE_HW_COUNTERS)' '$(PROFILE_HW_COUNTER_SCOPES)' '$(PROFILE_POOL_LOOKUP)' '$(USE_LOCAL_PSPGL)' '$(PSPGL_SWAP_INTERVAL)' '$(PSP_VME)' '$(PSP_FPS_OVERLAY)' '$(PSP_LOG)' '$(PSP_TRACE)' '$(PSP_RENDERER_DIAGNOSTICS)'; \
+	} > $@
+
+$(PROFILE_BUILD_COMMANDS): $(PROFILE_METADATA)
+	@mkdir -p $(dir $@)
+	$(call print,Writing profile commands:,$(PSP_PROFILE_MODE),$@)
+	$(V){ \
+		printf 'make psp-profile-gprof\n'; \
+		printf 'make psp-profile-phases\n'; \
+		printf 'make psp-profile-builds\n'; \
+		printf 'make psp-profile-artifacts\n'; \
+		printf '\nActual build command for this output:\n'; \
+		grep '^build_command=' $(PROFILE_METADATA) | sed 's/^build_command=//'; \
+	} > $@
+
+$(PROFILE_SHA256SUMS): $(PSP_EBOOT) $(PSP_ELF) $(PSP_MAP) $(PROFILE_METADATA) $(PROFILE_BUILD_COMMANDS)
+	@mkdir -p $(dir $@)
+	$(call print,Writing profile checksums:,$(PSP_PROFILE_MODE),$@)
+	$(V)( cd $(BUILD_DIR) && $(SHA256SUM) EBOOT.PBP $(TARGET).psp.elf $(TARGET).psp.map profile_build_metadata.txt PROFILE_BUILD_COMMANDS.txt > SHA256SUMS )
+
+$(PSP_SFO):
+	@mkdir -p $(dir $@)
+	$(call print,Generating PSP SFO:,$(PSP_TITLE),$@)
+	$(V)$(MKSFOEX) -d MEMSIZE=1 '$(PSP_TITLE)' $@
+
+.DELETE_ON_ERROR:
+ifneq ($(PSP_LAYOUT_DEPS),)
+$(PSP_LAYOUT_PLAN): $(PSP_LAYOUT_BASE_PLAN) src/psp/gfx/aquas_layout.py $(BUILD_DIR)/src/psp/gfx/gfx_psp_dl.o
+	$(PYTHON) src/psp/gfx/aquas_layout.py --base $(PSP_LAYOUT_BASE_PLAN) --object $(BUILD_DIR)/src/psp/gfx/gfx_psp_dl.o --output $@
+$(PSP_BASE_LINK_SCRIPT): $(PSP_LAYOUT_PLAN) $(PSP_LAYOUT_TOOL) $(PSPSDK)/lib/linkfile.prx Makefile
+	$(PYTHON) $(PSP_LAYOUT_TOOL) --plan $(PSP_LAYOUT_PLAN) --template $(PSPSDK)/lib/linkfile.prx --output $@ --build-dir $(BUILD_DIR) --library-dir $(N64PSP_DIR)/$(N64PSP_BUILD_PSP)
+
+$(PSP_LAYOUT_CONTROL_MAP): $(O_FILES) $(PSPGL_BUILD_DEPS) $(PSP_BASE_LINK_SCRIPT)
+	@mkdir -p $(dir $@)
+	$(call print,Linking layout control:,$<,$(PSP_LAYOUT_CONTROL_ELF))
+	$(V)$(CC) $(O_FILES) $(filter-out $(PSP_MAP_FLAG) $(PSP_LINK_FLAG),$(LDFLAGS)) -Wl,-Map,$@ -Wl,-q,-T$(PSP_BASE_LINK_SCRIPT) $(PSP_LIBS) -o $(PSP_LAYOUT_CONTROL_ELF)
+
+$(PSP_LINK_SCRIPT): $(PSP_LAYOUT_CONTROL_MAP) $(PSP_LAYOUT_RELOCATIONS) $(PSP_LAYOUT_RELOCATION_TOOL) $(PSP_BASE_LINK_SCRIPT)
+	$(PYTHON) $(PSP_LAYOUT_RELOCATION_TOOL) --map $(PSP_LAYOUT_CONTROL_MAP) --elf $(PSP_LAYOUT_CONTROL_ELF) --template $(PSP_BASE_LINK_SCRIPT) --relocations $(PSP_LAYOUT_RELOCATIONS) --output $@
+endif
+
+$(PSP_ELF): $(O_FILES) $(PSPGL_BUILD_DEPS) $(PSP_LAYOUT_DEPS) src/psp/gfx/native_asset_compile.py src/psp/gfx/native_assets.json
+	@mkdir -p $(dir $@)
+	$(call print,Linking PSP ELF:,$<,$@)
+	$(V)$(CC) $(O_FILES) $(LDFLAGS) $(PSP_LIBS) -o $@
+	$(V)$(PSP_FIXUP_IMPORTS) $@
+ifneq ($(PSP_LAYOUT_DEPS),)
+	$(PYTHON) $(PSP_LAYOUT_TOOL) --plan $(PSP_LAYOUT_PLAN) --verify-elf $@
+endif
+	$(PYTHON) src/psp/gfx/native_asset_compile.py $(NATIVE_COVERAGE_ARGS) --build-dir $(BUILD_DIR) --verify-elf $@
+ifeq ($(PSP_GFX_GU_SCRATCHPAD),1)
+	$(PYTHON) src/psp/gfx/scratchpad_code.py verify $(BUILD_DIR) --layout-plan $(PSP_LAYOUT_PLAN)
+endif
+
+$(PSP_MAP): $(PSP_ELF)
+	@test -f $@
+
+$(N64PSP_BUILD_STAMP): FORCE
+	$(MAKE) -C $(N64PSP_DIR) \
+		BUILD_PSP=$(N64PSP_BUILD_PSP) \
+		PSP_CONFIG=$(PSP_CONFIG) \
+		PSP_CC=$(CC) \
+		PSP_AR=psp-ar \
+		N64PSP_PROFILE_PSP=$(if $(filter 1,$(PROFILE_PSP)),1,0) \
+		$(N64PSP_BUILD_TARGETS)
+	@touch $@
+
+$(N64PSP_PSP_ARCHIVES): $(N64PSP_BUILD_STAMP)
+
+$(LOCAL_PSPGL_LIB): FORCE
+	env -u MAKEFLAGS $(MAKE) -C $(PSPGL_DIR) .deps libGL.a \
+		PSPPATH=$(PSPDEV)/psp \
+		PSPSDK=$(PSPSDK) \
+		ARCH=psp- \
+		CC="$(CC) -std=gnu99" \
+		AR=psp-ar \
+		RANLIB=psp-ranlib
+
+$(COMPILE_FLAGS_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(CFLAGS)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+$(BUILD_DIR)/%.o: %.c Makefile src/psp/sources.mk $(COMPILE_FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(call print,Compiling:,$<,$@)
+	$(V)$(CC) -c $(CFLAGS) $(source_warning_flags) -I$(dir $*) -o $@ $<
+
+$(BUILD_DIR)/src/psp/audio_me.o: CFLAGS += -std=gnu99
+$(BUILD_DIR)/src/psp/audio_mixer.o: CFLAGS += -std=gnu99 -fno-tree-loop-distribute-patterns -UPSP_LOG_ENABLED -DPSP_LOG_ENABLED=0
+
+$(BUILD_DIR)/src/libultra/libc/string.o: lib/n64psp/include/n64psp/detail/memory_psp_impl.h
+
+$(BUILD_DIR)/src/psp/hw_counter_profile.o: src/psp/hw_counter_profile.h src/psp/texture_attribution.h src/psp/texture_attribution.inc.c
+$(BUILD_DIR)/src/psp/gfx/gfx_psp_gu_texture.o: src/psp/texture_attribution.h
+$(BUILD_DIR)/src/engine/fox_bg.o: src/psp/command_source.h src/psp/zoness_water_rebatch.h src/psp/zoness_water_cull.h
+$(BUILD_DIR)/src/psp/gfx/gfx_psp_dl.o: src/psp/hw_counter_profile.h src/psp/zoness_water_cull.h
+CFLAGS += -I$(BUILD_DIR)
+NATIVE_ASSET_MANIFEST := src/psp/gfx/native_assets.json
+NATIVE_SELECTION_STAMP := $(BUILD_DIR)/native-selection.stamp
+$(NATIVE_SELECTION_STAMP): FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' '$(NATIVE_COVERAGE_ARGS)' > $@.tmp
+	@if ! cmp -s $@.tmp $@; then mv $@.tmp $@; else rm -f $@.tmp; fi
+
+NATIVE_ASSET_SOURCES := $(shell $(PYTHON) src/psp/gfx/native_asset_compile.py $(NATIVE_COVERAGE_ARGS) --sources)
+NATIVE_ASSET_OBJECTS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(NATIVE_ASSET_SOURCES))
+NATIVE_ASSET_HEADERS := $(addprefix include/assets/,$(notdir $(NATIVE_ASSET_SOURCES:.c=.h)))
+$(BUILD_DIR)/native_assets.inc.c: $(NATIVE_ASSET_OBJECTS) $(NATIVE_ASSET_HEADERS) src/psp/gfx/native_asset_compile.py $(NATIVE_ASSET_MANIFEST) $(NATIVE_COVERAGE_POLICY) $(NATIVE_SELECTION_STAMP)
+	$(PYTHON) src/psp/gfx/native_asset_compile.py $(NATIVE_COVERAGE_ARGS) --build-dir $(BUILD_DIR) --report $(BUILD_DIR)/native_assets.json $@
+
+ifeq ($(PSP_GFX_HAS_GU),1)
+RETAINED_ASSET_SOURCES := $(shell $(PYTHON) src/psp/gfx/native_asset_compile.py --retained-sources)
+RETAINED_ASSET_OBJECTS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(RETAINED_ASSET_SOURCES))
+RETAINED_ASSET_HEADERS := $(addprefix include/assets/,$(notdir $(RETAINED_ASSET_SOURCES:.c=.h)))
+RETAINED_RUNTIME_SOURCES := $(shell rg --files src/engine src/overlays src/psp -g '*.c' -g '*.h' -g '*.S' -g '*.s')
+$(BUILD_DIR)/retained_assets.h $(BUILD_DIR)/retained_assets.inc.c &: $(RETAINED_ASSET_OBJECTS) $(RETAINED_ASSET_HEADERS) $(RETAINED_RUNTIME_SOURCES) $(BUILD_DIR)/src/engine/fox_rcp.o src/engine/fox_rcp_setup.c src/psp/gfx/native_asset_compile.py $(NATIVE_ASSET_MANIFEST) include/PR/gbi.h
+	$(PYTHON) src/psp/gfx/native_asset_compile.py --retained --build-dir $(BUILD_DIR)
+
+$(BUILD_DIR)/src/psp/gfx/gfx_psp_dl.o $(BUILD_DIR)/src/psp/gfx/gfx_psp_retained_sources.o: $(BUILD_DIR)/retained_assets.h
+$(BUILD_DIR)/src/psp/gfx/gfx_psp_retained_sources.o: $(BUILD_DIR)/retained_assets.inc.c
+endif
+
+$(BUILD_DIR)/src/psp/gfx/gfx_psp_dl.o: $(BUILD_DIR)/native_assets.inc.c src/psp/gfx/gfx_psp_native_assets.inc.c
+$(BUILD_DIR)/src/psp/gfx/gfx_psp_dl.o: src/psp/gfx/gfx_psp_retained_mesh.inc.c lib/n64psp/include/n64psp/native_mesh.h
+$(BUILD_DIR)/src/psp/gfx/gfx_psp_dl.o: lib/n64psp/include/n64psp/math.h
+$(BUILD_DIR)/src/psp/gfx/gfx_psp_dl.o $(BUILD_DIR)/src/psp/gfx/gfx_psp_seams.o: src/psp/gfx/gfx_psp_seams.h
+$(BUILD_DIR)/src/psp/gfx/gfx_psp_dl.o $(BUILD_DIR)/src/psp/gfx/gfx_psp_retained_sources.o: src/psp/gfx/gfx_psp_retained_sources.h
+$(BUILD_DIR)/src/psp/gfx/gfx_psp_dl.o $(BUILD_DIR)/src/psp/input.o $(BUILD_DIR)/src/psp/renderer_bridge.o: src/psp/gfx/gfx_psp_dl.h
+$(BUILD_DIR)/src/psp/input.o: src/psp/hw_counter_profile.h
+
+$(BUILD_DIR)/%.o: %.S Makefile src/psp/sources.mk $(COMPILE_FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(call print,Assembling:,$<,$@)
+	$(V)$(CC) -c $(CFLAGS) -I$(dir $*) -o $@ $<
+
+clean:
+	$(RM) -r $(BUILD_DIR) build/psp-bootstrap
+ifneq ($(wildcard $(N64PSP_DIR)/Makefile),)
+	$(MAKE) -C $(N64PSP_DIR) clean
+endif
+
+ifeq ($(PSP_GFX_GU_SCRATCHPAD),1)
+include src/psp/gfx/scratchpad.mk
+endif
+
+print-%:
+	$(info $* is a $(flavor $*) variable set to [$($*)])
+	@true
+
+resolve-queue-trace:
+	$(PYTHON) tools/psp_resolve_queue_trace.py \
+		--log $(QUEUE_TRACE_LOG) \
+		--elf $(PSP_ELF) \
+		--load-base $(PSP_LOAD_BASE) \
+		$(foreach q,$(QUEUE_TRACE_QUEUES),--queue $(q))
+
+-include $(DEP_FILES)
+
+.PHONY: tools-init toolchain torch init decompress extract assets clean-generated resolve-queue-trace psp-profile-gprof psp-profile-phases psp-profile-combined psp-profile-builds psp-profile-artifacts psp-profile-report psp-profile-hw-counters FORCE

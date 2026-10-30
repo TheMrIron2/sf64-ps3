@@ -1,0 +1,115 @@
+#ifndef PSP_GFX_PSP_DL_H
+#define PSP_GFX_PSP_DL_H
+
+#include "PR/ultratypes.h"
+#include "libultra/ultra64.h"
+
+typedef struct {
+    u32 commandCount;
+    u32 vertexCount;
+    u32 triangleCount;
+    u32 nestedDlFollowed;
+    u32 nestedDlRejected;
+    u32 unsupportedCount;
+    u32 firstUnsupportedOpcode;
+    u32 mtxCount;
+    u32 mtxFloatCount;
+    u32 mtxPushCount;
+    u32 mtxPopCount;
+    u32 mtxStackRejected;
+    u32 mtxElidedCount;
+    u32 mtxUnexpectedFlags;
+    u32 mtxMaxStackDepth;
+    u32 viewportCount;
+    u32 invalidVertexCount;
+    u32 outsideVertexCount;
+    u32 nearZeroWCount;
+    u32 behindEyeVertexCount;
+    u32 invalidTriangleCount;
+    u32 sharedClipTriangleCount;
+    u32 eyePlaneCrossingTriangleCount;
+    u32 behindEyeTriangleCount;
+    u32 clippedTriangleCount;
+    u32 nearPlaneClippedTriangleCount;
+    u32 clipRejectedTriangleCount;
+    u32 clipGeneratedTriangleCount;
+    u32 texturedClippedTriangleCount;
+    u32 untexturedClippedTriangleCount;
+    u32 clipGeneratedVertexCount;
+    u32 clipMaxPolygonVertexCount;
+    u32 perspectiveSplitCount;
+    u32 perspectiveTriangleCount;
+    u32 projectedTriangleCount;
+    u32 pretransformedTriangleCount;
+    u32 degenerateTriangleCount;
+    u32 depthTestTriangleCount;
+    u32 depthWriteTriangleCount;
+    u32 fogTriangleCount;
+    u32 matrixPointerRejected;
+    u32 vertexPointerRejected;
+    u32 displayListPointerRejected;
+    u32 textureCount;
+    u32 textureRejected;
+    u32 rgba16TextureCount;
+    u32 rgba32TextureCount;
+    u32 ci4TextureCount;
+    u32 ia8TextureCount;
+    u32 ia16TextureCount;
+    u32 texturedTriangleCount;
+    u32 alphaTestTriangleCount;
+    u32 blendTriangleCount;
+    u32 textureRectangleCount;
+    u32 textureRectangleRejected;
+    u32 fillRectangleCount;
+    u32 fillRectanglePrimitiveColorCount;
+    u32 fillRectangleUnsupportedCount;
+    u32 commandLimitHit;
+    u32 depthLimitHit;
+    u32 maxDepthReached;
+    u32 drawVertexCount;
+    u32 originalFogDrawCount;
+    u32 originalFogTriangleCount;
+    u32 originalFogVertexBytes;
+    u32 originalFogVertexCopies;
+} PspGfxDlStats;
+
+int PspGfxDl_Run(const Gfx* dl, u32 taskIndex, PspGfxDlStats* outStats);
+
+#if PSP_GFX_BACKEND_GU
+enum {
+    MESH_REJECT_STATE, MESH_REJECT_FOG, MESH_REJECT_TRACE, MESH_REJECT_CACHE,
+    MESH_REJECT_BOUNDS, MESH_REJECT_MATERIALS, MESH_REJECT_ALLOCATE, MESH_REJECT_REASONS
+};
+typedef struct {
+    u32 hits, fallbacks, spans, vertices, restored, skipped;
+    u32 triangles, loaded, unregistered, rejects[MESH_REJECT_REASONS];
+} PspGfxDlRetainedStats;
+typedef char PspGfxDlRetainedStatsSizeCheck[sizeof(PspGfxDlRetainedStats) == 64 ? 1 : -1];
+void PspGfxDl_GetRetainedStats(PspGfxDlRetainedStats* stats);
+#endif
+
+#if PSP_NATIVE_COVERAGE_AB
+typedef struct {
+    u32 mode;
+    u32 calls;
+    u32 commands;
+} PspGfxDlNativeCoverageStats;
+
+void PspGfxDl_ToggleNativeCoverage(void);
+void PspGfxDl_GetNativeCoverageStats(PspGfxDlNativeCoverageStats* stats);
+#endif
+
+#if PSP_RENDERER_DIAGNOSTICS
+void PspGfxDl_TraceRequest(void);
+int PspGfxDl_TracePending(void);
+#else
+#define PspGfxDl_TraceRequest() ((void) 0)
+#define PspGfxDl_TracePending() (0)
+#endif
+
+#if PROFILE_HW_COUNTERS
+/* Work totals for the task that just ran, normalises counter captures */
+void PspGfxDl_GetLastWork(u32* commands, u32* loadedVertices, u32* submittedVertices);
+#endif
+
+#endif
