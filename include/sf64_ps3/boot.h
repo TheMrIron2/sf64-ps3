@@ -42,6 +42,8 @@ typedef struct Sf64OpeningState {
     float n64_slide;
     float logo_x, logo_y, logo_scale_x, logo_scale_y;
     float light_x, light_y, light_scale, light_scale2, logo_fade_out;
+    int sun_glare_alpha;
+    float sun_screen_x, sun_screen_y, sun_scale_x, sun_scale_y;
     float camera_xrot, camera_yrot, camera_weight, camera_speed;
     float star_speed;
     float camera_distance;
@@ -59,7 +61,7 @@ void sf64_opening_update(Sf64OpeningState *state);
 int sf64_opening_build_task(N64ps3GfxTask *task, uint8_t *rdram, uint32_t size,
                             const uint8_t *title, uint32_t title_size,
                             const uint8_t *stars, uint32_t stars_size,
-                            const Sf64OpeningState *state,
+                            Sf64OpeningState *state,
                             const uint8_t *great_fox, uint32_t great_fox_size);
 
 #endif

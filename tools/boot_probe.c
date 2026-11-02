@@ -219,7 +219,8 @@ int main(void)
     assert(sf64_team_running_build(&task, s_team_memory, sizeof(s_team_memory),
                                     sf64_title_segment_data, sf64_title_segment_size,
                                     opening.eye, opening.at, opening.up, opening.team_z_offset,
-                                    opening.passage_offset, 1.0f, opening.team_frames) == 0);
+                                    opening.passage_offset, 1.0f, opening.team_frames,
+                                    opening.team_name_visible, opening.team_name_index) == 0);
     count = 0;
     {
         N64ps3GfxF3dex1Status status = n64ps3_gfx_decode_f3dex1(&task, count_all, &count, &stats);

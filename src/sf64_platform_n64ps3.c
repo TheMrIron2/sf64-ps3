@@ -6,6 +6,7 @@
 #include "sf64_ps3/title_runtime.h"
 #include "sf64_ps3/controller.h"
 #include "sf64_ps3/boot.h"
+#include "sf64_ps3/takeoff.h"
 
 #include "n64ps3/n64ps3.h"
 #include "n64ps3/gfx_f3dex1.h"
@@ -54,12 +55,11 @@ extern const unsigned char sf64_arwing_segment_data[];
 extern const unsigned int sf64_arwing_segment_size;
 extern const unsigned char sf64_title_segment_data[];
 extern const unsigned int sf64_title_segment_size;
-#if !defined(SF64_PS3_BOOT_PROBE)
+/* Shared by the title-only harness and the combined boot-to-title build. */
 static u8 s_arwing_rdram[SF64_ARWING_RDRAM_REQUIRED_SIZE];
 static u8 s_title_starfield_commands[SF64_TITLE_STARFIELD_RDRAM_SIZE];
 static u32 s_title_starfield_command_bytes;
 static u32 s_title_star_count;
-#endif
 static int s_arwing_task_logged;
 #else
 
@@ -143,6 +143,175 @@ static int sf64_platform_count_triangle(void *user_data,
         return -1;
     }
     (*count)++;
+    return 0;
+}
+#endif
+
+#if defined(SF64_PS3_ARWING_PROBE)
+/* Render one original title-screen frame: starfield, Arwing, team, logos. */
+static int sf64_platform_submit_title_frame(void)
+{
+    N64ps3GfxTask task;
+    Sf64ArwingBuildInfo info;
+    Sf64TitleUiInfo title_ui_info;
+    Sf64OriginalTitleLighting team_lighting;
+    Sf64OriginalTitleArwingPose original_pose;
+    Sf64ArwingTitlePose arwing_pose;
+    Sf64TitleTeamModel team_models[4];
+    u32 team_limb_count = 0U;
+    u32 team_display_list_count = 0U;
+    float n64_logo_position[3];
+    int title_draw_active;
+
+    if (!s_original_title_logic_initialized) {
+        s32 game_state;
+        s32 title_state;
+        s32 cutscene_state;
+        s32 main_controller;
+
+        if (sf64_title_starfield_init() != 0 ||
+            sf64_original_title_logic_init() != 0) {
+            printf("[sf64-ps3] original title state initialization failed\n");
+            return -1;
+        }
+        sf64_original_title_logic_get_state(&game_state, &title_state,
+                                            &cutscene_state, &main_controller);
+        printf("[sf64-ps3] original title boot: game=%d title=%d cutscene=%d pad=%d\n",
+               game_state, title_state, cutscene_state, main_controller);
+        s_original_title_logic_initialized = 1;
+    }
+    if (sf64_original_title_logic_update() != 0 ||
+        sf64_original_title_logic_get_arwing_pose(&original_pose) != 0 ||
+        sf64_original_title_logic_get_64_logo_position(n64_logo_position) != 0 ||
+        sf64_original_title_logic_get_team_lighting(&team_lighting) != 0) {
+        printf("[sf64-ps3] original Title_Screen_Update failed\n");
+        return -1;
+    }
+#if defined(SF64_PS3_STATIC_ARWING_POSE)
+    original_pose.rotation_degrees[0] = 35.0f;
+#endif
+
+    memcpy(arwing_pose.position, original_pose.position,
+           sizeof(arwing_pose.position));
+    arwing_pose.scale = original_pose.scale;
+    memcpy(arwing_pose.rotation_degrees, original_pose.rotation_degrees,
+           sizeof(arwing_pose.rotation_degrees));
+    sf64_arwing_set_title_pose(&arwing_pose);
+
+    if (sf64_title_starfield_build_current(
+            s_title_starfield_commands,
+            (u32)sizeof(s_title_starfield_commands),
+            &s_title_starfield_command_bytes,
+            &s_title_star_count) != 0) {
+        printf("[sf64-ps3] original title starfield update failed\n");
+        return -1;
+    }
+    sf64_title_ui_reset();
+    title_draw_active = sf64_original_title_logic_draw();
+    if (title_draw_active <= 0) {
+        if (title_draw_active == 0) {
+            printf("[sf64-ps3] original title draw gate is inactive\n");
+        } else {
+            printf("[sf64-ps3] original title draw dispatch failed\n");
+        }
+        return -1;
+    }
+    if (sf64_arwing_build_title_task_with_starfield(
+            sf64_arwing_segment_data,
+            sf64_arwing_segment_size,
+            s_title_starfield_commands,
+            s_title_starfield_command_bytes,
+            s_title_star_count,
+            s_arwing_rdram,
+            (u32)sizeof(s_arwing_rdram),
+            &task,
+            &info) != 0) {
+        printf("[sf64-ps3] failed to build original title starfield/Arwing task\n");
+        return -1;
+    }
+    {
+        u32 team_index;
+        memset(team_models, 0, sizeof(team_models));
+        for (team_index = 0U; team_index < 4U; team_index++) {
+            if (sf64_original_title_logic_get_team_model(
+                    (int)team_index,
+                    &team_models[team_index].skeleton_address,
+                    &team_models[team_index].limb_count,
+                    team_models[team_index].position,
+                    team_models[team_index].rotation_degrees,
+                    &team_models[team_index].scale,
+                    team_models[team_index].joint_rotation_degrees) != 0) {
+                printf("[sf64-ps3] failed to read original title team pose %u\n",
+                       team_index);
+                return -1;
+            }
+        }
+    }
+    if (sf64_arwing_append_title_teams(&task,
+                                       sf64_title_segment_data,
+                                       sf64_title_segment_size,
+                                       team_models,
+                                       &team_lighting,
+                                       &team_limb_count,
+                                       &team_display_list_count) != 0) {
+        printf("[sf64-ps3] failed to append original title team skeletons\n");
+        return -1;
+    }
+    if (sf64_title_ui_append_logo(&task,
+                                  sf64_title_segment_data,
+                                  sf64_title_segment_size,
+                                  n64_logo_position,
+                                  &title_ui_info) != 0) {
+        printf("[sf64-ps3] failed to append original Star Fox title logo: %s\n",
+               sf64_title_ui_last_error());
+        return -1;
+    }
+    if (!s_arwing_task_logged) {
+        printf("[sf64-ps3] original Title_Screen_Update pose "
+               "pos=(%.1f,%.1f,%.1f) rot=(%.1f,%.1f,%.1f) scale=%.1f\n",
+               original_pose.position[0], original_pose.position[1],
+               original_pose.position[2], original_pose.rotation_degrees[0],
+               original_pose.rotation_degrees[1], original_pose.rotation_degrees[2],
+               original_pose.scale);
+        printf("[sf64-ps3] title frame starfield stars=%u commands=%u; "
+               "Arwing skeleton limbs=%u display-lists=%u "
+               "wing-frame=%u root-commands=%u\n",
+               s_title_star_count,
+               s_title_starfield_command_bytes / 8U,
+               info.skeleton_limb_count, info.display_list_count,
+               info.animation_frame, info.generated_command_count);
+        printf("[sf64-ps3] original Title_Draw logo strips=%u generated-commands=%u\n",
+               title_ui_info.logo_strip_count,
+               title_ui_info.generated_command_count);
+        printf("[sf64-ps3] original 64 logo panels=%u triangles=%u opaque-texels=%u "
+               "position=(%.1f,%.1f,%.1f) generated-display-list=1\n",
+               title_ui_info.n64_logo_panel_count,
+               title_ui_info.n64_logo_triangle_count,
+               title_ui_info.n64_logo_opaque_texels,
+               n64_logo_position[0], n64_logo_position[1],
+               n64_logo_position[2]);
+        printf("[sf64-ps3] original title team skeletons limbs=%u display-lists=%u "
+               "fox=(%.1f,%.1f,%.1f) falco=(%.1f,%.1f,%.1f); "
+               "press-start=%u\n",
+               team_limb_count, team_display_list_count,
+               team_models[0].position[0], team_models[0].position[1],
+               team_models[0].position[2], team_models[1].position[0],
+               team_models[1].position[1], team_models[1].position[2],
+               title_ui_info.press_start_drawn);
+        printf("[sf64-ps3] original title team light rgb=(%u,%u,%u) "
+               "ambient=(%u,%u,%u) direction=(%.1f,%.1f,%.1f)\n",
+               team_lighting.directional_rgb[0],
+               team_lighting.directional_rgb[1],
+               team_lighting.directional_rgb[2],
+               team_lighting.ambient_rgb[0], team_lighting.ambient_rgb[1],
+               team_lighting.ambient_rgb[2], team_lighting.direction[0],
+               team_lighting.direction[1], team_lighting.direction[2]);
+        s_arwing_task_logged = 1;
+    }
+
+    n64ps3_gfx_begin_frame();
+    n64ps3_gfx_submit_task(&task);
+    n64ps3_gfx_end_frame();
     return 0;
 }
 #endif
@@ -328,6 +497,8 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
     static uint8_t boot_memory[SF64_BOOT_RDRAM_BYTES];
     static Sf64BootState boot;
     static Sf64OpeningState opening;
+    static Sf64TakeoffState takeoff;
+    static Sf64SpaceState space;
     static uint8_t opening_memory[SF64_OPENING_RDRAM_BYTES];
     static uint8_t team_memory[SF64_ARWING_RDRAM_REQUIRED_SIZE];
     static uint8_t opening_stars[SF64_TITLE_STARFIELD_DISPLAY_LIST_CAPACITY];
@@ -335,8 +506,11 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
     static unsigned opening_star_count;
     static uint64_t next_opening_tick;
     static int opening_initialized;
+    static int takeoff_initialized;
+    static int space_initialized;
     static int initialized;
     static int logged_done;
+    static int title_entered;
     N64ps3GfxTask task;
     int visible;
     uint64_t now = (uint64_t)sysGetSystemTime();
@@ -372,9 +546,67 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
             if (now >= next_opening_tick && now - next_opening_tick > 133332U) {
                 next_opening_tick = now + 33333U;
             }
-            if (opening.finished) {
-                printf("[sf64-ps3] opening: takeoff scene not implemented\n");
+        }
+        if (opening.finished) {
+#if defined(SF64_PS3_ARWING_PROBE)
+            if (!takeoff_initialized) {
+                printf("[sf64-ps3] opening complete; starting takeoff scene\n");
+                sf64_takeoff_init(&takeoff);
+                takeoff_initialized = 1;
             }
+            if (!takeoff.finished) {
+                sf64_takeoff_update(&takeoff);
+                if (sf64_takeoff_build_task(
+                        &task, team_memory, sizeof(team_memory),
+                        sf64_arwing_segment_data, sf64_arwing_segment_size,
+                        sf64_title_segment_data, sf64_title_segment_size,
+                        &takeoff) != 0) {
+                    printf("[sf64-ps3] failed to build takeoff task\n");
+                    return SF64_API_FAILED;
+                }
+                n64ps3_gfx_begin_frame();
+                n64ps3_gfx_submit_task(&task);
+                n64ps3_gfx_end_frame();
+                return SF64_API_WORKED;
+            }
+            if (!space_initialized) {
+                printf("[sf64-ps3] takeoff complete; starting space fly-by\n");
+                sf64_space_init(&space);
+                space_initialized = 1;
+            }
+            if (!space.finished) {
+                sf64_space_update(&space);
+                if (sf64_space_build_task(
+                        &task, team_memory, sizeof(team_memory),
+                        sf64_arwing_segment_data, sf64_arwing_segment_size,
+                        sf64_title_segment_data, sf64_title_segment_size,
+                        sf64_great_fox_segment_data, sf64_great_fox_segment_size,
+                        &space) != 0) {
+                    printf("[sf64-ps3] failed to build space task\n");
+                    return SF64_API_FAILED;
+                }
+                n64ps3_gfx_begin_frame();
+                n64ps3_gfx_submit_task(&task);
+                n64ps3_gfx_end_frame();
+                return SF64_API_WORKED;
+            }
+            if (!title_entered) {
+                printf("[sf64-ps3] space complete; entering original title screen\n");
+                title_entered = 1;
+            }
+            return sf64_platform_submit_title_frame() == 0
+                       ? SF64_API_WORKED
+                       : SF64_API_FAILED;
+#else
+            if (sf64_boot_build_task(&task, boot_memory, sizeof(boot_memory),
+                                     sf64_boot_logo_data, sf64_boot_logo_size, 0) != 0) {
+                return SF64_API_FAILED;
+            }
+            n64ps3_gfx_begin_frame();
+            n64ps3_gfx_submit_task(&task);
+            n64ps3_gfx_end_frame();
+            return SF64_API_WORKED;
+#endif
         }
         if (opening.phase == 1 && opening.scene_state != 0) {
             float fade = 1.0f - (float)opening.fill_alpha / 255.0f;
@@ -382,7 +614,9 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
                                         sf64_title_segment_data, sf64_title_segment_size,
                                         opening.eye, opening.at, opening.up,
                                         opening.team_z_offset, opening.passage_offset,
-                                        fade, opening.team_frames) != 0) {
+                                        fade, opening.team_frames,
+                                        opening.team_name_visible,
+                                        opening.team_name_index) != 0) {
                 printf("[sf64-ps3] opening: failed to build team-running task\n");
                 return SF64_API_FAILED;
             }
@@ -421,168 +655,9 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
     n64ps3_gfx_end_frame();
     return SF64_API_WORKED;
 #elif defined(SF64_PS3_ARWING_PROBE)
-    N64ps3GfxTask task;
-    Sf64ArwingBuildInfo info;
-    Sf64TitleUiInfo title_ui_info;
-    Sf64OriginalTitleLighting team_lighting;
-    Sf64OriginalTitleArwingPose original_pose;
-    Sf64ArwingTitlePose arwing_pose;
-    Sf64TitleTeamModel team_models[4];
-    u32 team_limb_count = 0U;
-    u32 team_display_list_count = 0U;
-    float n64_logo_position[3];
-    int title_draw_active;
-
-    if (!s_original_title_logic_initialized) {
-        s32 game_state;
-        s32 title_state;
-        s32 cutscene_state;
-        s32 main_controller;
-
-        if (sf64_title_starfield_init() != 0 ||
-            sf64_original_title_logic_init() != 0) {
-            printf("[sf64-ps3] original title state initialization failed\n");
-            return SF64_API_FAILED;
-        }
-        sf64_original_title_logic_get_state(&game_state, &title_state,
-                                            &cutscene_state, &main_controller);
-        printf("[sf64-ps3] original title boot: game=%d title=%d cutscene=%d pad=%d\n",
-               game_state, title_state, cutscene_state, main_controller);
-        s_original_title_logic_initialized = 1;
-    }
-    if (sf64_original_title_logic_update() != 0 ||
-        sf64_original_title_logic_get_arwing_pose(&original_pose) != 0 ||
-        sf64_original_title_logic_get_64_logo_position(n64_logo_position) != 0 ||
-        sf64_original_title_logic_get_team_lighting(&team_lighting) != 0) {
-        printf("[sf64-ps3] original Title_Screen_Update failed\n");
-        return SF64_API_FAILED;
-    }
-#if defined(SF64_PS3_STATIC_ARWING_POSE)
-    original_pose.rotation_degrees[0] = 35.0f;
-#endif
-
-    memcpy(arwing_pose.position, original_pose.position,
-           sizeof(arwing_pose.position));
-    arwing_pose.scale = original_pose.scale;
-    memcpy(arwing_pose.rotation_degrees, original_pose.rotation_degrees,
-           sizeof(arwing_pose.rotation_degrees));
-    sf64_arwing_set_title_pose(&arwing_pose);
-
-    if (sf64_title_starfield_build_current(
-            s_title_starfield_commands,
-            (u32)sizeof(s_title_starfield_commands),
-            &s_title_starfield_command_bytes,
-            &s_title_star_count) != 0) {
-        printf("[sf64-ps3] original title starfield update failed\n");
-        return SF64_API_FAILED;
-    }
-    sf64_title_ui_reset();
-    title_draw_active = sf64_original_title_logic_draw();
-    if (title_draw_active <= 0) {
-        if (title_draw_active == 0) {
-            printf("[sf64-ps3] original title draw gate is inactive\n");
-        } else {
-            printf("[sf64-ps3] original title draw dispatch failed\n");
-        }
-        return SF64_API_FAILED;
-    }
-    if (sf64_arwing_build_title_task_with_starfield(
-            sf64_arwing_segment_data,
-            sf64_arwing_segment_size,
-            s_title_starfield_commands,
-            s_title_starfield_command_bytes,
-            s_title_star_count,
-            s_arwing_rdram,
-            (u32)sizeof(s_arwing_rdram),
-            &task,
-            &info) != 0) {
-        printf("[sf64-ps3] failed to build original title starfield/Arwing task\n");
-        return SF64_API_FAILED;
-    }
-    {
-        u32 team_index;
-        memset(team_models, 0, sizeof(team_models));
-        for (team_index = 0U; team_index < 4U; team_index++) {
-            if (sf64_original_title_logic_get_team_model(
-                    (int)team_index,
-                    &team_models[team_index].skeleton_address,
-                    &team_models[team_index].limb_count,
-                    team_models[team_index].position,
-                    team_models[team_index].rotation_degrees,
-                    &team_models[team_index].scale,
-                    team_models[team_index].joint_rotation_degrees) != 0) {
-                printf("[sf64-ps3] failed to read original title team pose %u\n",
-                       team_index);
-                return SF64_API_FAILED;
-            }
-        }
-    }
-    if (sf64_arwing_append_title_teams(&task,
-                                       sf64_title_segment_data,
-                                       sf64_title_segment_size,
-                                       team_models,
-                                       &team_lighting,
-                                       &team_limb_count,
-                                       &team_display_list_count) != 0) {
-        printf("[sf64-ps3] failed to append original title team skeletons\n");
-        return SF64_API_FAILED;
-    }
-    if (sf64_title_ui_append_logo(&task,
-                                  sf64_title_segment_data,
-                                  sf64_title_segment_size,
-                                  n64_logo_position,
-                                  &title_ui_info) != 0) {
-        printf("[sf64-ps3] failed to append original Star Fox title logo: %s\n",
-               sf64_title_ui_last_error());
-        return SF64_API_FAILED;
-    }
-    if (!s_arwing_task_logged) {
-        printf("[sf64-ps3] original Title_Screen_Update pose "
-               "pos=(%.1f,%.1f,%.1f) rot=(%.1f,%.1f,%.1f) scale=%.1f\n",
-               original_pose.position[0], original_pose.position[1],
-               original_pose.position[2], original_pose.rotation_degrees[0],
-               original_pose.rotation_degrees[1], original_pose.rotation_degrees[2],
-               original_pose.scale);
-        printf("[sf64-ps3] title frame starfield stars=%u commands=%u; "
-               "Arwing skeleton limbs=%u display-lists=%u "
-               "wing-frame=%u root-commands=%u\n",
-               s_title_star_count,
-               s_title_starfield_command_bytes / 8U,
-               info.skeleton_limb_count, info.display_list_count,
-               info.animation_frame, info.generated_command_count);
-        printf("[sf64-ps3] original Title_Draw logo strips=%u generated-commands=%u\n",
-               title_ui_info.logo_strip_count,
-               title_ui_info.generated_command_count);
-        printf("[sf64-ps3] original 64 logo panels=%u triangles=%u opaque-texels=%u "
-               "position=(%.1f,%.1f,%.1f) generated-display-list=1\n",
-               title_ui_info.n64_logo_panel_count,
-               title_ui_info.n64_logo_triangle_count,
-               title_ui_info.n64_logo_opaque_texels,
-               n64_logo_position[0], n64_logo_position[1],
-               n64_logo_position[2]);
-        printf("[sf64-ps3] original title team skeletons limbs=%u display-lists=%u "
-               "fox=(%.1f,%.1f,%.1f) falco=(%.1f,%.1f,%.1f); "
-               "press-start=%u\n",
-               team_limb_count, team_display_list_count,
-               team_models[0].position[0], team_models[0].position[1],
-               team_models[0].position[2], team_models[1].position[0],
-               team_models[1].position[1], team_models[1].position[2],
-               title_ui_info.press_start_drawn);
-        printf("[sf64-ps3] original title team light rgb=(%u,%u,%u) "
-               "ambient=(%u,%u,%u) direction=(%.1f,%.1f,%.1f)\n",
-               team_lighting.directional_rgb[0],
-               team_lighting.directional_rgb[1],
-               team_lighting.directional_rgb[2],
-               team_lighting.ambient_rgb[0], team_lighting.ambient_rgb[1],
-               team_lighting.ambient_rgb[2], team_lighting.direction[0],
-               team_lighting.direction[1], team_lighting.direction[2]);
-        s_arwing_task_logged = 1;
-    }
-
-    n64ps3_gfx_begin_frame();
-    n64ps3_gfx_submit_task(&task);
-    n64ps3_gfx_end_frame();
-    return SF64_API_WORKED;
+    return sf64_platform_submit_title_frame() == 0
+               ? SF64_API_WORKED
+               : SF64_API_FAILED;
 #else
     N64ps3GfxTask task;
     N64ps3GfxF3dex1Stats stats;

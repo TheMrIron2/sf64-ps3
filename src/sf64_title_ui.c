@@ -23,6 +23,10 @@
      SF64_TITLE_UI_N64_TEXTURE_OFFSET)
 #define SF64_TITLE_UI_TEAM_LIGHT_OFFSET 0x0008b000U
 #define SF64_TITLE_UI_PRESS_START_VERTEX_OFFSET 0x0007dc00U
+#define SF64_TITLE_UI_COPYRIGHT_SYMBOL_TEXTURE_OFFSET 0x00087000U
+#define SF64_TITLE_UI_COPYRIGHT_TEXT_TEXTURE_OFFSET 0x00089880U
+#define SF64_TITLE_UI_COPYRIGHT_SYMBOL_VERTEX_OFFSET 0x0007dd00U
+#define SF64_TITLE_UI_COPYRIGHT_TEXT_VERTEX_OFFSET 0x0007dd40U
 #define SF64_TITLE_UI_ROOT_OFFSET 0x00000100U
 #define SF64_TITLE_UI_MATRIX_LIMIT 0x00007000U
 #define SF64_TITLE_UI_WIDTH 320.0f
@@ -75,7 +79,6 @@
     ((SF64_TITLE_UI_LOGO_WIDTH - 1U) * 4U)
 #define SF64_TITLE_UI_PRESS_START_WIDTH 120U
 #define SF64_TITLE_UI_PRESS_START_HEIGHT 13U
-#define SF64_TITLE_UI_GFX_SETPRIMCOLOR 0xfa000000U
 
 typedef struct Sf64TitleUiRect {
     uint32_t texture_offset;
@@ -431,6 +434,89 @@ static void append_n64_logo(uint8_t *rdram,
     }
 }
 
+static int append_ia8_quad(uint8_t *rdram,
+                           uint32_t *command_count,
+                           const uint8_t *title_segment,
+                           uint32_t title_segment_size,
+                           uint32_t source_offset,
+                           uint32_t width,
+                           uint32_t height,
+                           int16_t x,
+                           int16_t y,
+                           uint32_t texture_offset,
+                           uint32_t vertex_offset)
+{
+    uint8_t *texture = rdram + texture_offset;
+    uint8_t *vertices = rdram + vertex_offset;
+    uint32_t pixel;
+
+    if (source_offset > title_segment_size ||
+        width * height > title_segment_size - source_offset) {
+        return -1;
+    }
+    for (pixel = 0; pixel < width * height; pixel++) {
+        uint8_t ia8 = title_segment[source_offset + pixel];
+        uint8_t intensity = (uint8_t)((ia8 >> 4) * 17U);
+        uint8_t alpha = (uint8_t)((ia8 & 0x0fU) * 17U);
+
+        if (alpha <= 32U) {
+            alpha = 0U;
+        } else {
+            alpha = (uint8_t)((((uint32_t)(alpha - 32U) * 255U) + 111U) / 223U);
+        }
+        texture[pixel * 4U] = intensity;
+        texture[pixel * 4U + 1U] = intensity;
+        texture[pixel * 4U + 2U] = intensity;
+        texture[pixel * 4U + 3U] = alpha;
+    }
+
+    append_command(rdram, command_count, SF64_TITLE_UI_GFX_PIPESYNC, 0U);
+    append_command(rdram, command_count, SF64_TITLE_UI_GFX_SETOTHERMODE_L,
+                   SF64_TITLE_UI_RENDER_MODE_XLU_SURFACE);
+    append_command(rdram, command_count,
+                   SF64_TITLE_UI_GFX_SETOTHERMODE_H_TEXTURE_FILTER,
+                   SF64_TITLE_UI_TEXTURE_FILTER_POINT);
+    append_command(rdram, command_count,
+                   SF64_TITLE_UI_GFX_MOVEWORD_SEGMENT | ((7U * 4U) << 8),
+                   0x80000000U | texture_offset);
+    append_command(rdram, command_count,
+                   SF64_TITLE_UI_GFX_SETTIMG_RGBA32 | (width - 1U),
+                   0x07000000U);
+    append_command(rdram, command_count, SF64_TITLE_UI_GFX_SETTILE_RGBA32,
+                   (SF64_TITLE_UI_TEXTURE_TILE_LOAD << 24) |
+                       SF64_TITLE_UI_TEXTURE_CLAMP_ST);
+    append_command(rdram, command_count, SF64_TITLE_UI_GFX_LOADSYNC, 0U);
+    append_command(rdram, command_count, SF64_TITLE_UI_GFX_LOADBLOCK,
+                   (SF64_TITLE_UI_TEXTURE_TILE_LOAD << 24) |
+                       ((width * height - 1U) << 12));
+    append_command(rdram, command_count, SF64_TITLE_UI_GFX_PIPESYNC, 0U);
+    append_command(rdram, command_count,
+                   SF64_TITLE_UI_GFX_SETTILE_RGBA32 |
+                       (((width * 4U + 7U) / 8U) << 9),
+                   SF64_TITLE_UI_TEXTURE_CLAMP_ST);
+    append_command(rdram, command_count, SF64_TITLE_UI_GFX_SETTILESIZE,
+                   (((width - 1U) * 4U) << 12) | ((height - 1U) * 4U));
+
+    write_vertex(vertices, x, y, 0, 0);
+    write_vertex(vertices + SF64_TITLE_UI_VERTEX_BYTES,
+                 (int16_t)(x + (int16_t)width), y, (int16_t)(width * 32U), 0);
+    write_vertex(vertices + 2U * SF64_TITLE_UI_VERTEX_BYTES,
+                 (int16_t)(x + (int16_t)width),
+                 (int16_t)(y + (int16_t)height), (int16_t)(width * 32U),
+                 (int16_t)(height * 32U));
+    write_vertex(vertices + 3U * SF64_TITLE_UI_VERTEX_BYTES, x,
+                 (int16_t)(y + (int16_t)height), 0,
+                 (int16_t)(height * 32U));
+
+    append_command(rdram, command_count,
+                   SF64_TITLE_UI_GFX_VTX | (4U << 10) |
+                       (4U * SF64_TITLE_UI_VERTEX_BYTES - 1U),
+                   0x80000000U | vertex_offset);
+    append_command(rdram, command_count, SF64_TITLE_UI_GFX_TRI1, 0x00000204U);
+    append_command(rdram, command_count, SF64_TITLE_UI_GFX_TRI1, 0x00000406U);
+    return 0;
+}
+
 static int append_press_start(uint8_t *rdram,
                               uint32_t *command_count,
                               const uint8_t *title_segment,
@@ -491,11 +577,6 @@ static int append_press_start(uint8_t *rdram,
     append_command(rdram, command_count,
                    SF64_TITLE_UI_GFX_MOVEWORD_SEGMENT | ((7U * 4U) << 8),
                    0x80080000U);
-    append_command(rdram, command_count, SF64_TITLE_UI_GFX_SETPRIMCOLOR,
-                   ((uint32_t)s_press_start_color[0] << 24) |
-                       ((uint32_t)s_press_start_color[1] << 16) |
-                       ((uint32_t)s_press_start_color[2] << 8) |
-                       s_press_start_color[3]);
     append_command(rdram, command_count,
                    SF64_TITLE_UI_GFX_SETTIMG_RGBA32 |
                        (SF64_TITLE_UI_PRESS_START_WIDTH - 1U),
@@ -702,7 +783,8 @@ int sf64_title_ui_append_logo(N64ps3GfxTask *task,
         task->display_list_size_bytes / SF64_TITLE_UI_GFX_BYTES;
     if (SF64_TITLE_UI_ROOT_OFFSET +
             (original_command_count - 1U + 6U +
-             SF64_TITLE_UI_LOGO_CHUNK_COUNT * 11U + 23U + 6U + 7U * 11U + 1U) *
+             SF64_TITLE_UI_LOGO_CHUNK_COUNT * 11U + 23U + 34U + 6U +
+             7U * 11U + 1U) *
             SF64_TITLE_UI_GFX_BYTES >
         SF64_TITLE_UI_MATRIX_LIMIT) {
         s_title_ui_error = "title UI exceeds RDRAM matrix region";
@@ -828,6 +910,23 @@ int sf64_title_ui_append_logo(N64ps3GfxTask *task,
                        0x00000406U);
     }
 
+    {
+        if (append_ia8_quad(rdram, &command_count, title_segment,
+                            title_segment_size, 0x00013470U, 16U, 16U, 234,
+                            20, SF64_TITLE_UI_COPYRIGHT_SYMBOL_TEXTURE_OFFSET,
+                            SF64_TITLE_UI_COPYRIGHT_SYMBOL_VERTEX_OFFSET) !=
+            0) {
+            s_title_ui_error = "copyright symbol texture invalid";
+            return -1;
+        }
+        if (append_ia8_quad(rdram, &command_count, title_segment,
+                            title_segment_size, 0x0000ddc0U, 120U, 12U, 102,
+                            209, SF64_TITLE_UI_COPYRIGHT_TEXT_TEXTURE_OFFSET,
+                            SF64_TITLE_UI_COPYRIGHT_TEXT_VERTEX_OFFSET) != 0) {
+            s_title_ui_error = "copyright text texture invalid";
+            return -1;
+        }
+    }
     {
         int press_start_result = append_press_start(
             rdram, &command_count, title_segment, title_segment_size);

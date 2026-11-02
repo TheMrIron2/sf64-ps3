@@ -4,6 +4,42 @@
 
 #include <string.h>
 
+static const float s_sun_glare_pos[12] = {
+    0.0f, 0.0f, 0.0f, 0.0f, 10.0f, 13.0f, 20.0f, 35.0f, 40.0f, 50.0f, 50.0f, 70.0f
+};
+static const float s_sun_glare_scale[12] = {
+    20.0f, 22.0f, 24.0f, 28.0f, 30.0f, 14.0f, 16.0f, 18.0f, 27.0f, 28.0f, 70.0f, 40.0f
+};
+static const unsigned char s_sun_glare_blue[12] = {
+    192, 128, 96, 64, 64, 64, 64, 64, 64, 64, 64, 64
+};
+static const int s_sun_glare_alpha[12] = {
+    80, 64, 48, 32, 12, 32, 44, 32, 42, 36, 12, 38
+};
+static const unsigned char s_sun_glare_dl[12] = {
+    1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 2, 1
+};
+
+static void opening_matrix_translate(float m[4][4], float x, float y, float z)
+{
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        m[3][i] += m[0][i] * x + m[1][i] * y + m[2][i] * z;
+    }
+}
+
+static void opening_matrix_scale(float m[4][4], float x, float y, float z)
+{
+    int i;
+
+    for (i = 0; i < 4; i++) {
+        m[0][i] *= x;
+        m[1][i] *= y;
+        m[2][i] *= z;
+    }
+}
+
 enum { BOOT = 100, BOOT_WAIT, SHOW_LOGO, CHECK_SAVE, LOGO_WAIT, START, INIT = 1 };
 
 void sf64_boot_init(Sf64BootState *boot)
@@ -89,6 +125,42 @@ static void vertex(uint8_t *p, int x, int y, int s, int t)
     put16(p + 8, (uint16_t)s);
     put16(p + 10, (uint16_t)t);
     p[12] = p[13] = p[14] = p[15] = 255;
+}
+
+static void opening_append_glare(uint8_t *rdram, unsigned *count,
+                                 uint32_t texture_offset,
+                                 uint32_t matrix_offset,
+                                 unsigned blue, unsigned alpha)
+{
+    uint8_t *vertices = rdram + 0x8300U;
+    unsigned i;
+
+    command(rdram, count, 0x01020040U, 0x80000000U | matrix_offset);
+    command(rdram, count, 0xb6000000U, 0x00023001U);
+    command(rdram, count, 0xd7000001U, 0xffffffffU);
+    command(rdram, count, 0xe3000c02U, 0x00002000U);
+    command(rdram, count, 0xb900031dU, 0x00504240U);
+    command(rdram, count, 0xbc001c06U, 0x80000000U | texture_offset);
+    command(rdram, count, 0xe7000000U, 0U);
+    command(rdram, count, 0xfd180000U | 31U, 0x07000000U);
+    command(rdram, count, 0xf5180000U, 0x07000000U | (2U << 8) | (2U << 18));
+    command(rdram, count, 0xe6000000U, 0U);
+    command(rdram, count, 0xf3000000U,
+            0x07000000U | ((32U * 32U - 1U) << 12));
+    command(rdram, count, 0xe7000000U, 0U);
+    command(rdram, count, 0xf5182000U, (2U << 8) | (2U << 18));
+    command(rdram, count, 0xf2000000U, (124U << 12) | 124U);
+    vertex(vertices, -20, 20, 0, 0);
+    vertex(vertices + 16U, -20, -20, 0, 1024);
+    vertex(vertices + 32U, 20, -20, 1024, 1024);
+    vertex(vertices + 48U, 20, 20, 1024, 0);
+    for (i = 0; i < 4U; i++) {
+        vertices[i * 16U + 14U] = (uint8_t)blue;
+        vertices[i * 16U + 15U] = (uint8_t)alpha;
+    }
+    command(rdram, count, 0x0400103fU, 0x80008300U);
+    command(rdram, count, 0xbf000000U, 0x00000204U);
+    command(rdram, count, 0xbf000000U, 0x00000406U);
 }
 
 int sf64_boot_build_task(N64ps3GfxTask *task, uint8_t *rdram, uint32_t size,
@@ -183,7 +255,7 @@ static void opening_texture(uint8_t *dest, const uint8_t *indices,
 int sf64_opening_build_task(N64ps3GfxTask *task, uint8_t *rdram, uint32_t size,
                             const uint8_t *title, uint32_t title_size,
                             const uint8_t *stars, uint32_t stars_size,
-                            const Sf64OpeningState *state,
+                            Sf64OpeningState *state,
                             const uint8_t *great_fox, uint32_t great_fox_size)
 {
     float sx, sy, ortho[16] = {0};
@@ -237,6 +309,62 @@ int sf64_opening_build_task(N64ps3GfxTask *task, uint8_t *rdram, uint32_t size,
         command(rdram, &count, 0xb7000000U, 0x00020001U);
         command(rdram, &count, 0x06000000U, 0x0e000000U);
     }
+    if (state->show_sun != 0 && state->n64_slide > -870.0f &&
+        state->n64_slide < 900.0f && state->fill_alpha > 0) {
+        float sun_projection[16];
+        float sun_view[16];
+        uint8_t *glare1 = rdram + 0x12000U;
+        uint8_t *glare2 = rdram + 0x13000U;
+        float fade;
+        unsigned i;
+
+        sf64_camera_matrices(state->eye, state->at, state->up, sun_projection,
+                             sun_view);
+        matrix(rdram + 0x8800, sun_projection);
+        matrix(rdram + 0x8840, sun_view);
+        for (i = 0; i < 32U * 32U; i++) {
+            uint16_t value1 = (uint16_t)((title[0x36328U + i * 2U] << 8) |
+                                         title[0x36328U + i * 2U + 1U]);
+            uint16_t value2 = (uint16_t)((title[0x36bc8U + i * 2U] << 8) |
+                                         title[0x36bc8U + i * 2U + 1U]);
+
+            glare1[i * 4U] = glare1[i * 4U + 1U] = glare1[i * 4U + 2U] =
+                (uint8_t)(value1 >> 8);
+            glare1[i * 4U + 3U] = (uint8_t)(value1 & 0xffU);
+            glare2[i * 4U] = glare2[i * 4U + 1U] = glare2[i * 4U + 2U] =
+                (uint8_t)(value2 >> 8);
+            glare2[i * 4U + 3U] = (uint8_t)(value2 & 0xffU);
+        }
+        command(rdram, &count, 0x01060040U, 0x80008800U);
+        command(rdram, &count, 0x01020040U, 0x80008840U);
+
+        fade = state->fill_alpha < 10 ? (float)state->fill_alpha / 10.0f : 1.0f;
+        fade *= 0.5f;
+        for (i = 0; i < 12U; i++) {
+            float m[4][4];
+            float offset_x = state->n64_slide * -0.03f;
+            float offset_y = 205.0f * 0.03f;
+            unsigned alpha = i >= 4U
+                                 ? (unsigned)((float)s_sun_glare_alpha[i] * fade)
+                                 : (unsigned)s_sun_glare_alpha[i];
+            uint32_t texture_offset = s_sun_glare_dl[i] == 1U ? 0x12000U : 0x13000U;
+
+            memcpy(m, sun_view, sizeof(m));
+            opening_matrix_translate(m, state->n64_slide, 205.0f, -200.0f);
+            if (i >= 4U) {
+                opening_matrix_translate(
+                    m, s_sun_glare_pos[i] * offset_x,
+                    -s_sun_glare_pos[i] * offset_y, 0.0f);
+            }
+            opening_matrix_scale(m, s_sun_glare_scale[i] * 0.5f,
+                                 s_sun_glare_scale[i] * 0.5f,
+                                 s_sun_glare_scale[i] * 0.5f);
+            matrix(rdram + 0x8880U + i * 64U, (const float *)m);
+            opening_append_glare(rdram, &count, texture_offset,
+                                 0x8880U + i * 64U, s_sun_glare_blue[i],
+                                 alpha);
+        }
+    }
     sf64_display_fit_4_3(sf64_display_aspect(), &sx, &sy);
     ortho[0] = 2.0f / 320.0f * sx;
     ortho[5] = -2.0f / 240.0f * sy;
@@ -245,6 +373,68 @@ int sf64_opening_build_task(N64ps3GfxTask *task, uint8_t *rdram, uint32_t size,
     ortho[13] = sy;
     matrix(rdram + 0x8000, ortho);
     matrix(rdram + 0x8040, identity);
+    if (state->show_sun != 0 && state->n64_slide > -870.0f &&
+        state->n64_slide < 900.0f && state->fill_alpha > 0) {
+        uint8_t *texture = rdram + 0x11000U;
+        uint8_t *sun_vertices = rdram + 0x8280U;
+        unsigned alpha;
+        unsigned j;
+
+        if (state->n64_slide < 0.0f && state->sun_glare_alpha < 255) {
+            state->sun_glare_alpha += 2;
+        }
+        if (state->n64_slide > 0.0f && state->sun_glare_alpha > 0) {
+            state->sun_glare_alpha -= 2;
+        }
+        alpha = (unsigned)state->sun_glare_alpha;
+        for (j = 0; j < 32U * 32U; j++) {
+            uint16_t value = (uint16_t)((title[0xd5c0U + j * 2U] << 8) |
+                                        title[0xd5c0U + j * 2U + 1U]);
+            unsigned r = (value >> 11) & 31U;
+            unsigned g = (value >> 6) & 31U;
+            unsigned b = (value >> 1) & 31U;
+
+            texture[j * 4U] = (uint8_t)((r << 3) | (r >> 2));
+            texture[j * 4U + 1U] = (uint8_t)((g << 3) | (g >> 2));
+            texture[j * 4U + 2U] = (uint8_t)((b << 3) | (b >> 2));
+            texture[j * 4U + 3U] = 255U;
+        }
+        command(rdram, &count, 0x01060040U, 0x80008000U);
+        command(rdram, &count, 0x01020040U, 0x80008040U);
+        command(rdram, &count, 0xb6000000U, 0x00023001U);
+        command(rdram, &count, 0xd7000001U, 0xffffffffU);
+        command(rdram, &count, 0xe3000c02U, 0x00002000U);
+        command(rdram, &count, 0xb900031dU, 0x00504240U);
+        command(rdram, &count, 0xbc001c06U, 0x80011000U);
+        command(rdram, &count, 0xe7000000U, 0U);
+        command(rdram, &count, 0xfd180000U | 31U, 0x07000000U);
+        command(rdram, &count, 0xf5180000U,
+                0x07000000U | (2U << 8) | (2U << 18));
+        command(rdram, &count, 0xe6000000U, 0U);
+        command(rdram, &count, 0xf3000000U,
+                0x07000000U | ((32U * 32U - 1U) << 12));
+        command(rdram, &count, 0xe7000000U, 0U);
+        command(rdram, &count, 0xf5182000U, (2U << 8) | (2U << 18));
+        command(rdram, &count, 0xf2000000U, (124U << 12) | 124U);
+        {
+            int x0 = (int)state->sun_screen_x;
+            int y0 = (int)state->sun_screen_y;
+            int x1 = x0 + (int)(32.0f * state->sun_scale_x);
+            int y1 = y0 + (int)(32.0f * state->sun_scale_y);
+
+            vertex(sun_vertices, x0, y0, 0, 0);
+            vertex(sun_vertices + 16U, x1, y0, 32 * 32, 0);
+            vertex(sun_vertices + 32U, x1, y1, 32 * 32, 32 * 32);
+            vertex(sun_vertices + 48U, x0, y1, 0, 32 * 32);
+        }
+        for (j = 0; j < 4U; j++) {
+            sun_vertices[j * 16U + 15U] = (uint8_t)alpha;
+        }
+        command(rdram, &count, 0x0400103fU, 0x80008280U);
+        command(rdram, &count, 0xbf000000U, 0x00000204U);
+        command(rdram, &count, 0xbf000000U, 0x00000406U);
+        state->sun_screen_x += 1.66f;
+    }
     if (state->logo_state == 0) {
         opening_texture(rdram + 0x9000, title + 0x14140, title + 0x147c0, 256U * 13U);
         opening_texture(rdram + 0xc400, title + 0x147e0, title + 0x148b0, 32U * 13U);

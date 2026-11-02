@@ -130,6 +130,9 @@ void sf64_opening_init(Sf64OpeningState *state) {
     state->great_fox_position[2] = 30.0f;
     state->light_y = 162.0f;
     state->fade_mode = 255;
+    state->sun_screen_y = 60.0f;
+    state->sun_scale_x = 1.0f;
+    state->sun_scale_y = 1.0f;
     state->eye[0] = opening_camera[0].eye.x;
     state->eye[1] = opening_camera[0].eye.y;
     state->eye[2] = opening_camera[0].eye.z;

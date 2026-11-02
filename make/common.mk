@@ -20,6 +20,7 @@ SF64_COMMON_C_FILES := \
 	src/sf64_display.c \
 	src/sf64_controller.c \
 	src/sf64_boot.c \
+	src/sf64_takeoff.c \
 	src/sf64_arwing.c \
 	src/sf64_title_ui.c \
 	src/sf64_platform_n64ps3.c \

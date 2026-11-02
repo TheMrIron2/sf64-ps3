@@ -1,5 +1,6 @@
 #include "sf64_ps3/arwing.h"
 #include "sf64_ps3/display.h"
+#include "sf64_ps3/takeoff.h"
 
 #include <math.h>
 #include <string.h>
@@ -366,6 +367,18 @@ static void matrix_perspective(Sf64ArwingMatrix matrix)
 }
 
 static void matrix_transform_direction(Sf64ArwingMatrix matrix, const float input[3], float output[3]);
+
+void sf64_camera_matrices(const float eye[3], const float at[3], const float up[3],
+                          float projection[16], float view[16])
+{
+    Sf64ArwingMatrix p;
+    Sf64ArwingMatrix v;
+
+    matrix_perspective(p);
+    matrix_look_at(v, eye[0], eye[1], eye[2], at[0], at[1], at[2], up[0], up[1], up[2]);
+    memcpy(projection, p, sizeof(p));
+    memcpy(view, v, sizeof(v));
+}
 
 void sf64_great_fox_matrices(const float eye[3], const float at[3], const float up[3],
                              const float position[3], float light_x, float light_y, float projection[16],
@@ -1237,11 +1250,21 @@ int sf64_arwing_append_title_teams(N64ps3GfxTask *task, const u8 *title_segment,
                                    lighting, limb_count, display_list_count, NULL, NULL, NULL);
 }
 
+static int team_running_append_card(N64ps3GfxTask *task, const u8 *title,
+                                    u32 title_size, int team_index,
+                                    u8 *rdram);
+static int team_running_append_shadows(N64ps3GfxTask *task,
+                                       const Sf64TitleTeamModel models[4],
+                                       const float eye[3], const float at[3],
+                                       const float up[3], float team_z_offset,
+                                       u8 *rdram);
+
 int sf64_team_running_build(N64ps3GfxTask *task, u8 *rdram, u32 rdram_size,
                             const u8 *title, u32 title_size,
                             const float eye[3], const float at[3], const float up[3],
                             float team_z_offset, float passage_offset, float fade,
-                            const int frames[4])
+                            const int frames[4], int team_name_visible,
+                            int team_name_index)
 {
     static const float positions[4][3] = {
         {-20.0f, 0.0f, -600.0f}, {-209.0f, 0.0f, -820.0f},
@@ -1311,5 +1334,1263 @@ int sf64_team_running_build(N64ps3GfxTask *task, u8 *rdram, u32 rdram_size,
     task->display_list = rdram + SF64_ARWING_ROOT_LIST_OFFSET;
     task->display_list_size_bytes = builder.root_command_count * SF64_ARWING_GFX_COMMAND_BYTES;
     task->debug_name = "SF64 opening team running";
-    return append_title_teams_view(task, title, title_size, models, &lighting, NULL, NULL, eye, at, up);
+    if (append_title_teams_view(task, title, title_size, models, &lighting,
+                                NULL, NULL, eye, at, up) != 0) {
+        return -1;
+    }
+    if (team_running_append_shadows(task, models, eye, at, up, team_z_offset,
+                                    rdram) != 0) {
+        return -1;
+    }
+    if (team_name_visible && team_name_index >= 0 && team_name_index < 4) {
+        if (team_running_append_card(task, title, title_size, team_name_index,
+                                     rdram) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+#define SF64_TAKEOFF_ROOT_OFFSET 0x00000100U
+#define SF64_TAKEOFF_MATRIX_OFFSET 0x00007000U
+#define SF64_TAKEOFF_MATRIX_ADDRESS 0x80007000U
+#define SF64_TAKEOFF_LIGHT_OFFSET 0x00008000U
+#define SF64_TAKEOFF_LIGHT_ADDRESS 0x80008000U
+#define SF64_TAKEOFF_PROJECTION_OFFSET 0x00008040U
+#define SF64_TAKEOFF_PROJECTION_ADDRESS 0x80008040U
+#define SF64_TAKEOFF_VIEW_OFFSET 0x00008080U
+#define SF64_TAKEOFF_VIEW_ADDRESS 0x80008080U
+#define SF64_TAKEOFF_ORTHO_OFFSET 0x00008200U
+#define SF64_TAKEOFF_ORTHO_ADDRESS 0x80008200U
+#define SF64_TAKEOFF_IDENTITY_OFFSET 0x00008240U
+#define SF64_TAKEOFF_IDENTITY_ADDRESS 0x80008240U
+#define SF64_TAKEOFF_OBJECT_MATRIX_OFFSET 0x00008800U
+#define SF64_TAKEOFF_OBJECT_MATRIX_ADDRESS 0x80008800U
+#define SF64_TAKEOFF_CARD_TEXTURE_OFFSET 0x00084000U
+#define SF64_TAKEOFF_CARD_VERTEX_OFFSET 0x00087000U
+#define SF64_TAKEOFF_FLASH_TEXTURE_OFFSET 0x00083f00U
+#define SF64_TAKEOFF_FLASH_VERTEX_OFFSET 0x00087400U
+#define SF64_TAKEOFF_GLOW_TEXTURE_OFFSET 0x00087800U
+#define SF64_TAKEOFF_GLOW_VERTEX_OFFSET 0x00088840U
+#define SF64_TAKEOFF_GLOW_SEGMENT_OFFSET 0x00032178U
+#define SF64_TAKEOFF_SHADOW_TEXTURE_OFFSET 0x00088880U
+#define SF64_TAKEOFF_SHADOW_VERTEX_OFFSET 0x00089880U
+#define SF64_TAKEOFF_SHADOW_SEGMENT_OFFSET 0x00032608U
+#define SF64_TAKEOFF_G_SETTIMG_RGBA16 0xfd100000U
+#define SF64_TAKEOFF_G_SETTILE_RGBA16 0xf5100000U
+#define SF64_TAKEOFF_DECK_DL 0x06018d40U
+#define SF64_TAKEOFF_DECK_PLATFORM_DL 0x0602a720U
+#define SF64_TAKEOFF_DECK_LAUNCHER_DL 0x0601c7c0U
+#define SF64_TAKEOFF_CARD_TEXTURE_SEGMENT_OFFSET 0x00011890U
+#define SF64_TAKEOFF_CARD_WIDTH 112U
+#define SF64_TAKEOFF_CARD_HEIGHT 26U
+#define SF64_TAKEOFF_CARD_X 101
+#define SF64_TAKEOFF_CARD_Y 197
+#define SF64_TAKEOFF_SCREEN_WIDTH 320.0f
+#define SF64_TAKEOFF_SCREEN_HEIGHT 240.0f
+#define SF64_TAKEOFF_G_SETTIMG_RGBA32 0xfd180000U
+#define SF64_TAKEOFF_G_SETTILE_RGBA32 0xf5180000U
+#define SF64_TAKEOFF_G_LOADBLOCK 0xf3000000U
+#define SF64_TAKEOFF_G_LOADSYNC 0xe6000000U
+#define SF64_TAKEOFF_G_PIPESYNC 0xe7000000U
+#define SF64_TAKEOFF_G_SETTILESIZE 0xf2000000U
+#define SF64_TAKEOFF_G_TRI1 0xbf000000U
+#define SF64_TAKEOFF_G_VTX 0x04000000U
+#define SF64_TAKEOFF_G_CLEARGEOMETRYMODE 0xb6000000U
+#define SF64_TAKEOFF_G_SETOTHERMODE_H 0xe3000c02U
+#define SF64_TAKEOFF_G_SETOTHERMODE_L 0xb900031dU
+#define SF64_TAKEOFF_G_MOVEWORD_SEGMENT7 0xbc001c06U
+#define SF64_TAKEOFF_TEXTURE_CLAMP_ST ((2U << 8) | (2U << 18))
+#define SF64_TAKEOFF_TEXTURE_TILE_LOAD 7U
+#define SF64_TAKEOFF_CLEAR_GEOMETRY_BITS 0x00023001U
+#define SF64_TAKEOFF_TEXTURE_FILTER_BILERP 0x00002000U
+#define SF64_TAKEOFF_RENDER_MODE_XLU 0x00504240U
+
+static void takeoff_write_light(uint8_t *rdram, uint32_t offset,
+                                const Sf64TakeoffState *state, int directional)
+{
+    uint8_t *light = rdram + offset;
+    uint8_t *ambient = light + 16;
+
+    memset(light, 0, 16);
+    memset(ambient, 0, 16);
+    if (directional) {
+        light[0] = (uint8_t)state->light1_r;
+        light[1] = (uint8_t)state->light1_g;
+        light[2] = (uint8_t)state->light1_b;
+    }
+    light[8] = (uint8_t)((int32_t)state->light_dir[0] & 0xff);
+    light[9] = (uint8_t)((int32_t)state->light_dir[1] & 0xff);
+    light[10] = (uint8_t)((int32_t)state->light_dir[2] & 0xff);
+    ambient[0] = (uint8_t)state->ambient_r;
+    ambient[1] = (uint8_t)state->ambient_g;
+    ambient[2] = (uint8_t)state->ambient_b;
+}
+
+static void takeoff_ortho_matrix(Sf64ArwingMatrix matrix)
+{
+    float scale_x;
+    float scale_y;
+
+    memset(matrix, 0, sizeof(Sf64ArwingMatrix));
+    sf64_display_fit_4_3(sf64_display_aspect(), &scale_x, &scale_y);
+    matrix[0][0] = (2.0f / SF64_TAKEOFF_SCREEN_WIDTH) * scale_x;
+    matrix[1][1] = (-2.0f / SF64_TAKEOFF_SCREEN_HEIGHT) * scale_y;
+    matrix[2][2] = 1.0f;
+    matrix[3][0] = -scale_x;
+    matrix[3][1] = scale_y;
+    matrix[3][3] = 1.0f;
+}
+
+static void takeoff_write_vertex(uint8_t *destination, int16_t x, int16_t y,
+                                 int16_t s, int16_t t)
+{
+    write_be16(destination, (uint16_t)x);
+    write_be16(destination + 2U, (uint16_t)y);
+    write_be16(destination + 4U, 0U);
+    write_be16(destination + 6U, 0U);
+    write_be16(destination + 8U, (uint16_t)s);
+    write_be16(destination + 10U, (uint16_t)t);
+    destination[12] = 255U;
+    destination[13] = 255U;
+    destination[14] = 255U;
+    destination[15] = 255U;
+}
+
+static void takeoff_append_card(Sf64ArwingBuilder *builder,
+                                const uint8_t *title_segment,
+                                uint8_t *rdram)
+{
+    Sf64ArwingMatrix ortho;
+    Sf64ArwingMatrix identity;
+    uint8_t *texture = rdram + SF64_TAKEOFF_CARD_TEXTURE_OFFSET;
+    uint8_t *vertices = rdram + SF64_TAKEOFF_CARD_VERTEX_OFFSET;
+    uint32_t pixel;
+
+    for (pixel = 0; pixel < SF64_TAKEOFF_CARD_WIDTH * SF64_TAKEOFF_CARD_HEIGHT;
+         pixel++) {
+        uint8_t ia8 = title_segment[SF64_TAKEOFF_CARD_TEXTURE_SEGMENT_OFFSET +
+                                    pixel];
+        uint8_t intensity = (uint8_t)((ia8 >> 4) * 17U);
+        uint8_t alpha = (uint8_t)((ia8 & 0x0fU) * 17U);
+
+        if (alpha <= 32U) {
+            alpha = 0U;
+        } else {
+            alpha = (uint8_t)((((uint32_t)(alpha - 32U) * 255U) + 111U) / 223U);
+        }
+        texture[pixel * 4U] = intensity;
+        texture[pixel * 4U + 1U] = intensity;
+        texture[pixel * 4U + 2U] = intensity;
+        texture[pixel * 4U + 3U] = alpha;
+    }
+
+    takeoff_ortho_matrix(ortho);
+    matrix_identity(identity);
+    matrix_write_n64(rdram + SF64_TAKEOFF_ORTHO_OFFSET, ortho);
+    matrix_write_n64(rdram + SF64_TAKEOFF_IDENTITY_OFFSET, identity);
+
+    list_append(builder, SF64_ARWING_G_MTX_PROJECTION_LOAD,
+                SF64_TAKEOFF_ORTHO_ADDRESS);
+    list_append(builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                SF64_TAKEOFF_IDENTITY_ADDRESS);
+    list_append(builder, SF64_TAKEOFF_G_CLEARGEOMETRYMODE,
+                SF64_TAKEOFF_CLEAR_GEOMETRY_BITS);
+    list_append(builder, SF64_ARWING_G_TEXTURE, 0xffffffffU);
+    list_append(builder, SF64_TAKEOFF_G_SETOTHERMODE_H,
+                0x00000000U);
+    list_append(builder, SF64_TAKEOFF_G_SETOTHERMODE_L,
+                SF64_TAKEOFF_RENDER_MODE_XLU);
+    list_append(builder, SF64_TAKEOFF_G_MOVEWORD_SEGMENT7,
+                0x80000000U | SF64_TAKEOFF_CARD_TEXTURE_OFFSET);
+    list_append(builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_SETTIMG_RGBA32 |
+                             (SF64_TAKEOFF_CARD_WIDTH - 1U),
+                0x07000000U);
+    list_append(builder, SF64_TAKEOFF_G_SETTILE_RGBA32,
+                (SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24) |
+                    SF64_TAKEOFF_TEXTURE_CLAMP_ST);
+    list_append(builder, SF64_TAKEOFF_G_LOADSYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_LOADBLOCK,
+                (SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24) |
+                    ((SF64_TAKEOFF_CARD_WIDTH * SF64_TAKEOFF_CARD_HEIGHT - 1U)
+                     << 12));
+    list_append(builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_SETTILE_RGBA32 |
+                             (((SF64_TAKEOFF_CARD_WIDTH * 4U + 7U) / 8U) << 9),
+                SF64_TAKEOFF_TEXTURE_CLAMP_ST);
+    list_append(builder, SF64_TAKEOFF_G_SETTILESIZE,
+                (((SF64_TAKEOFF_CARD_WIDTH - 1U) * 4U) << 12) |
+                    ((SF64_TAKEOFF_CARD_HEIGHT - 1U) * 4U));
+
+    takeoff_write_vertex(vertices, SF64_TAKEOFF_CARD_X, SF64_TAKEOFF_CARD_Y, 0, 0);
+    takeoff_write_vertex(vertices + 16U, SF64_TAKEOFF_CARD_X + (int)SF64_TAKEOFF_CARD_WIDTH,
+                         SF64_TAKEOFF_CARD_Y, SF64_TAKEOFF_CARD_WIDTH * 32, 0);
+    takeoff_write_vertex(vertices + 32U, SF64_TAKEOFF_CARD_X + (int)SF64_TAKEOFF_CARD_WIDTH,
+                         SF64_TAKEOFF_CARD_Y + (int)SF64_TAKEOFF_CARD_HEIGHT,
+                         SF64_TAKEOFF_CARD_WIDTH * 32, SF64_TAKEOFF_CARD_HEIGHT * 32);
+    takeoff_write_vertex(vertices + 48U, SF64_TAKEOFF_CARD_X,
+                         SF64_TAKEOFF_CARD_Y + (int)SF64_TAKEOFF_CARD_HEIGHT,
+                         0, SF64_TAKEOFF_CARD_HEIGHT * 32);
+
+    list_append(builder, SF64_TAKEOFF_G_VTX | (4U << 10) | (4U * 16U - 1U),
+                0x80000000U | SF64_TAKEOFF_CARD_VERTEX_OFFSET);
+    list_append(builder, SF64_TAKEOFF_G_TRI1, 0x00000204U);
+    list_append(builder, SF64_TAKEOFF_G_TRI1, 0x00000406U);
+}
+
+static void takeoff_append_flash(Sf64ArwingBuilder *builder,
+                                 const Sf64TakeoffState *state,
+                                 uint8_t *rdram)
+{
+    Sf64ArwingMatrix ortho;
+    Sf64ArwingMatrix identity;
+    uint8_t *texture = rdram + SF64_TAKEOFF_FLASH_TEXTURE_OFFSET;
+    uint8_t *vertices = rdram + SF64_TAKEOFF_FLASH_VERTEX_OFFSET;
+    int alpha = state->fill_alpha;
+    int i;
+
+    if (alpha <= 0) {
+        return;
+    }
+    if (alpha > 255) {
+        alpha = 255;
+    }
+
+    texture[0] = 0xffU;
+    texture[1] = 0xffU;
+    takeoff_ortho_matrix(ortho);
+    matrix_identity(identity);
+    matrix_write_n64(rdram + SF64_TAKEOFF_ORTHO_OFFSET, ortho);
+    matrix_write_n64(rdram + SF64_TAKEOFF_IDENTITY_OFFSET, identity);
+
+    list_append(builder, SF64_ARWING_G_MTX_PROJECTION_LOAD,
+                SF64_TAKEOFF_ORTHO_ADDRESS);
+    list_append(builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                SF64_TAKEOFF_IDENTITY_ADDRESS);
+    list_append(builder, SF64_TAKEOFF_G_CLEARGEOMETRYMODE,
+                SF64_TAKEOFF_CLEAR_GEOMETRY_BITS);
+    list_append(builder, SF64_ARWING_G_TEXTURE, 0xffffffffU);
+    list_append(builder, SF64_TAKEOFF_G_SETOTHERMODE_H,
+                SF64_TAKEOFF_TEXTURE_FILTER_BILERP);
+    list_append(builder, SF64_TAKEOFF_G_SETOTHERMODE_L,
+                SF64_TAKEOFF_RENDER_MODE_XLU);
+    list_append(builder, SF64_TAKEOFF_G_MOVEWORD_SEGMENT7,
+                0x80000000U | SF64_TAKEOFF_FLASH_TEXTURE_OFFSET);
+    list_append(builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_SETTIMG_RGBA16, 0x07000000U);
+    list_append(builder, SF64_TAKEOFF_G_SETTILE_RGBA16,
+                (SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24) |
+                    SF64_TAKEOFF_TEXTURE_CLAMP_ST);
+    list_append(builder, SF64_TAKEOFF_G_LOADSYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_LOADBLOCK,
+                SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24);
+    list_append(builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_SETTILE_RGBA16 |
+                             (((1U * 2U + 7U) / 8U) << 9),
+                SF64_TAKEOFF_TEXTURE_CLAMP_ST);
+    list_append(builder, SF64_TAKEOFF_G_SETTILESIZE, 0U);
+
+    takeoff_write_vertex(vertices, 0, 0, 0, 0);
+    takeoff_write_vertex(vertices + 16U, 320, 0, 0, 0);
+    takeoff_write_vertex(vertices + 32U, 320, 240, 0, 0);
+    takeoff_write_vertex(vertices + 48U, 0, 240, 0, 0);
+    for (i = 0; i < 4; i++) {
+        uint8_t *vertex = vertices + (uint32_t)i * 16U;
+        vertex[12] = (uint8_t)state->fill_red;
+        vertex[13] = (uint8_t)state->fill_green;
+        vertex[14] = (uint8_t)state->fill_blue;
+        vertex[15] = (uint8_t)alpha;
+    }
+
+    list_append(builder, SF64_TAKEOFF_G_VTX | (4U << 10) | (4U * 16U - 1U),
+                0x80000000U | SF64_TAKEOFF_FLASH_VERTEX_OFFSET);
+    list_append(builder, SF64_TAKEOFF_G_TRI1, 0x00000204U);
+    list_append(builder, SF64_TAKEOFF_G_TRI1, 0x00000406U);
+}
+
+static void takeoff_setup_engine_glow(Sf64ArwingBuilder *builder,
+                                      const uint8_t *title_segment,
+                                      uint8_t *rdram)
+{
+    uint8_t *texture = rdram + SF64_TAKEOFF_GLOW_TEXTURE_OFFSET;
+    uint8_t *vertices = rdram + SF64_TAKEOFF_GLOW_VERTEX_OFFSET;
+    uint32_t pixel;
+    uint32_t i;
+
+    for (pixel = 0; pixel < 32U * 32U; pixel++) {
+        uint8_t ia8 = title_segment[SF64_TAKEOFF_GLOW_SEGMENT_OFFSET + pixel];
+        uint8_t intensity = (uint8_t)((ia8 >> 4) * 17U);
+        texture[pixel * 4U] = intensity;
+        texture[pixel * 4U + 1U] = intensity;
+        texture[pixel * 4U + 2U] = intensity;
+        texture[pixel * 4U + 3U] = (uint8_t)((ia8 & 0x0fU) * 17U);
+    }
+
+    list_append(builder, SF64_TAKEOFF_G_CLEARGEOMETRYMODE,
+                SF64_TAKEOFF_CLEAR_GEOMETRY_BITS);
+    list_append(builder, SF64_ARWING_G_TEXTURE, 0xffffffffU);
+    list_append(builder, SF64_TAKEOFF_G_SETOTHERMODE_H,
+                SF64_TAKEOFF_TEXTURE_FILTER_BILERP);
+    list_append(builder, SF64_TAKEOFF_G_SETOTHERMODE_L,
+                SF64_TAKEOFF_RENDER_MODE_XLU);
+    list_append(builder, SF64_TAKEOFF_G_MOVEWORD_SEGMENT7,
+                0x80000000U | SF64_TAKEOFF_GLOW_TEXTURE_OFFSET);
+    list_append(builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_SETTIMG_RGBA32 | 31U, 0x07000000U);
+    list_append(builder, SF64_TAKEOFF_G_SETTILE_RGBA32,
+                (SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24) |
+                    SF64_TAKEOFF_TEXTURE_CLAMP_ST);
+    list_append(builder, SF64_TAKEOFF_G_LOADSYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_LOADBLOCK,
+                (SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24) |
+                    ((32U * 32U - 1U) << 12));
+    list_append(builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_SETTILE_RGBA32 |
+                             (((32U * 4U + 7U) / 8U) << 9),
+                SF64_TAKEOFF_TEXTURE_CLAMP_ST);
+    list_append(builder, SF64_TAKEOFF_G_SETTILESIZE,
+                (124U << 12) | 124U);
+
+    takeoff_write_vertex(vertices, -40, 40, 0, 0);
+    takeoff_write_vertex(vertices + 16U, -40, -40, 0, 1024);
+    takeoff_write_vertex(vertices + 32U, 40, -40, 1024, 1024);
+    takeoff_write_vertex(vertices + 48U, 40, 40, 1024, 0);
+    for (i = 0; i < 4U; i++) {
+        uint8_t *vertex = vertices + i * 16U;
+        vertex[12] = 128U;
+        vertex[13] = 128U;
+        vertex[14] = 255U;
+        vertex[15] = 255U;
+    }
+}
+
+static void takeoff_append_engine_glow(Sf64ArwingBuilder *builder,
+                                       const Sf64TakeoffArwing *arwing,
+                                       const float eye[3],
+                                       Sf64ArwingMatrix view,
+                                       uint32_t slot)
+{
+    const float degrees_to_radians = SF64_ARWING_TWO_PI / 360.0f;
+    float source_offset;
+    float camera_y;
+    float distance;
+    float camera_x;
+    Sf64ArwingMatrix matrix;
+
+    source_offset = arwing->engine_particle == 1 ? -30.0f : -65.0f;
+    camera_y = -atan2f(eye[0] - arwing->position[0],
+                       eye[2] - arwing->position[2]);
+    distance = sqrtf((eye[2] - arwing->position[2]) *
+                         (eye[2] - arwing->position[2]) +
+                     (eye[0] - arwing->position[0]) *
+                         (eye[0] - arwing->position[0]));
+    camera_x = atan2f(eye[1] - arwing->position[1], distance);
+
+    memcpy(matrix, view, sizeof(matrix));
+    matrix_translate(matrix, arwing->position[0], arwing->position[1],
+                     arwing->position[2]);
+    matrix_scale(matrix, arwing->scale, arwing->scale, arwing->scale);
+    matrix_rotate_z(matrix, arwing->rotation_degrees[2] * degrees_to_radians);
+    matrix_rotate_x(matrix, arwing->rotation_degrees[0] * degrees_to_radians);
+    matrix_rotate_y(matrix, arwing->rotation_degrees[1] * degrees_to_radians);
+    matrix_translate(matrix, 0.0f, 0.0f, source_offset);
+    matrix_scale(matrix, arwing->engine_glow_scale,
+                 arwing->engine_glow_scale * 0.7f,
+                 arwing->engine_glow_scale);
+    matrix_rotate_z(matrix, -arwing->rotation_degrees[2] * degrees_to_radians);
+    matrix_rotate_x(matrix, -arwing->rotation_degrees[0] * degrees_to_radians);
+    matrix_rotate_y(matrix, -arwing->rotation_degrees[1] * degrees_to_radians);
+    matrix_rotate_y(matrix, -camera_y);
+    matrix_rotate_x(matrix, -camera_x);
+
+    matrix_write_n64(builder->rdram + SF64_TAKEOFF_OBJECT_MATRIX_OFFSET +
+                         slot * 64U,
+                     matrix);
+    list_append(builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                SF64_TAKEOFF_OBJECT_MATRIX_ADDRESS + slot * 64U);
+    list_append(builder, SF64_TAKEOFF_G_VTX | (4U << 10) | (4U * 16U - 1U),
+                0x80000000U | SF64_TAKEOFF_GLOW_VERTEX_OFFSET);
+    list_append(builder, SF64_TAKEOFF_G_TRI1, 0x00000204U);
+    list_append(builder, SF64_TAKEOFF_G_TRI1, 0x00000406U);
+}
+
+static void takeoff_write_vertex3(uint8_t *destination, int16_t x, int16_t y,
+                                  int16_t z, int16_t s, int16_t t)
+{
+    write_be16(destination, (uint16_t)x);
+    write_be16(destination + 2U, (uint16_t)y);
+    write_be16(destination + 4U, (uint16_t)z);
+    write_be16(destination + 6U, 0U);
+    write_be16(destination + 8U, (uint16_t)s);
+    write_be16(destination + 10U, (uint16_t)t);
+    destination[12] = 255U;
+    destination[13] = 255U;
+    destination[14] = 255U;
+    destination[15] = 240U;
+}
+
+static void takeoff_setup_shadow(Sf64ArwingBuilder *builder,
+                                 const uint8_t *title_segment,
+                                 uint8_t *rdram)
+{
+    uint8_t *texture = rdram + SF64_TAKEOFF_SHADOW_TEXTURE_OFFSET;
+    uint8_t *vertices = rdram + SF64_TAKEOFF_SHADOW_VERTEX_OFFSET;
+    uint32_t pixel;
+
+    for (pixel = 0; pixel < 32U * 32U; pixel++) {
+        uint16_t packed =
+            (uint16_t)(((uint16_t)title_segment[SF64_TAKEOFF_SHADOW_SEGMENT_OFFSET +
+                                               pixel * 2U]
+                        << 8) |
+                       title_segment[SF64_TAKEOFF_SHADOW_SEGMENT_OFFSET +
+                                     pixel * 2U + 1U]);
+        uint8_t intensity = (uint8_t)(packed >> 8);
+        uint8_t alpha = (uint8_t)(packed & 0xffU);
+
+        texture[pixel * 4U] = intensity;
+        texture[pixel * 4U + 1U] = intensity;
+        texture[pixel * 4U + 2U] = intensity;
+        texture[pixel * 4U + 3U] = alpha;
+    }
+
+    list_append(builder, SF64_TAKEOFF_G_CLEARGEOMETRYMODE, 0x00020000U);
+    list_append(builder, SF64_ARWING_G_TEXTURE, 0xffffffffU);
+    list_append(builder, SF64_TAKEOFF_G_SETOTHERMODE_H,
+                SF64_TAKEOFF_TEXTURE_FILTER_BILERP);
+    list_append(builder, SF64_TAKEOFF_G_SETOTHERMODE_L,
+                SF64_TAKEOFF_RENDER_MODE_XLU);
+    list_append(builder, SF64_TAKEOFF_G_MOVEWORD_SEGMENT7,
+                0x80000000U | SF64_TAKEOFF_SHADOW_TEXTURE_OFFSET);
+    list_append(builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_SETTIMG_RGBA32 | 31U, 0x07000000U);
+    list_append(builder, SF64_TAKEOFF_G_SETTILE_RGBA32,
+                SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24);
+    list_append(builder, SF64_TAKEOFF_G_LOADSYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_LOADBLOCK,
+                (SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24) |
+                    ((32U * 32U - 1U) << 12));
+    list_append(builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(builder,
+                SF64_TAKEOFF_G_SETTILE_RGBA32 |
+                    (((32U * 4U + 7U) / 8U) << 9),
+                0U);
+    list_append(builder, SF64_TAKEOFF_G_SETTILESIZE, (124U << 12) | 124U);
+
+    takeoff_write_vertex3(vertices, 0, 0, -80, 512, -256);
+    takeoff_write_vertex3(vertices + 16U, -100, 0, 20, -768, 1024);
+    takeoff_write_vertex3(vertices + 32U, 100, 0, 20, 1792, 1024);
+}
+
+static void takeoff_append_shadow(Sf64ArwingBuilder *builder,
+                                  const Sf64TakeoffArwing *arwing,
+                                  const Sf64TakeoffState *state,
+                                  Sf64ArwingMatrix view,
+                                  uint32_t slot)
+{
+    const float degrees_to_radians = SF64_ARWING_TWO_PI / 360.0f;
+    float shadow_y = (state->deck_shadow - arwing->position[1] * 2.05f) +
+                     (state->deck_offset_y - 84.0f) * 1.99f;
+    Sf64ArwingMatrix matrix;
+
+    memcpy(matrix, view, sizeof(matrix));
+    matrix_translate(matrix, arwing->position[0], arwing->position[1],
+                     arwing->position[2]);
+    matrix_scale(matrix, arwing->scale, arwing->scale, arwing->scale);
+    matrix_rotate_z(matrix, arwing->rotation_degrees[2] * degrees_to_radians);
+    matrix_rotate_x(matrix, arwing->rotation_degrees[0] * degrees_to_radians);
+    matrix_rotate_y(matrix, arwing->rotation_degrees[1] * degrees_to_radians);
+    matrix_translate(matrix, 0.0f, shadow_y, 0.0f);
+    matrix_rotate_y(matrix, 3.14159265358979323846f);
+    matrix_write_n64(builder->rdram + SF64_TAKEOFF_OBJECT_MATRIX_OFFSET +
+                         slot * 64U,
+                     matrix);
+    list_append(builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                SF64_TAKEOFF_OBJECT_MATRIX_ADDRESS + slot * 64U);
+    list_append(builder, SF64_TAKEOFF_G_VTX | (3U << 10) | (3U * 16U - 1U),
+                0x80000000U | SF64_TAKEOFF_SHADOW_VERTEX_OFFSET);
+    list_append(builder, SF64_TAKEOFF_G_TRI1, 0x00000204U);
+}
+
+static int takeoff_emit_arwing(Sf64ArwingBuilder *builder,
+                               const Sf64ArwingLimb *root_limb,
+                               u32 root_joint_index,
+                               const Sf64TakeoffArwing *pose,
+                               Sf64ArwingMatrix view)
+{
+    const float degrees_to_radians = SF64_ARWING_TWO_PI / 360.0f;
+    Sf64ArwingMatrix world;
+    Sf64ArwingMatrix root;
+    Sf64ArwingMatrix final_matrix;
+
+    matrix_identity(root);
+    matrix_translate(root, root_limb->translation[0], root_limb->translation[1],
+                     root_limb->translation[2]);
+    matrix_rotate_z(root, builder->joint_angles[root_joint_index][2]);
+    matrix_rotate_y(root, builder->joint_angles[root_joint_index][1]);
+    matrix_rotate_x(root, builder->joint_angles[root_joint_index][0]);
+
+    memcpy(world, view, sizeof(world));
+    matrix_translate(world, pose->position[0], pose->position[1],
+                     pose->position[2]);
+    matrix_scale(world, pose->scale, pose->scale, pose->scale);
+    matrix_rotate_z(world, pose->rotation_degrees[2] * degrees_to_radians);
+    matrix_rotate_x(world, pose->rotation_degrees[0] * degrees_to_radians);
+    matrix_rotate_y(world, pose->rotation_degrees[1] * degrees_to_radians);
+
+    if (root_limb->display_list != 0U) {
+        matrix_multiply(final_matrix, world, root);
+        matrix_write_n64(builder->rdram + builder->matrix_offset +
+                             builder->display_list_count * 64U,
+                         final_matrix);
+        list_append(builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                    builder->matrix_address + builder->display_list_count * 64U);
+        list_append(builder, SF64_ARWING_G_DL, root_limb->display_list);
+        builder->display_list_count++;
+    }
+    builder->visited_count = 0U;
+    if (root_limb->child != 0U &&
+        emit_limb(builder, root_limb->child, &root, &world) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int sf64_takeoff_build_task(N64ps3GfxTask *task,
+                            uint8_t *rdram,
+                            uint32_t rdram_size,
+                            const uint8_t *arwing_segment,
+                            uint32_t arwing_segment_size,
+                            const uint8_t *title_segment,
+                            uint32_t title_segment_size,
+                            const Sf64TakeoffState *state)
+{
+    u32 skeleton[SF64_ARWING_MAX_LIMBS];
+    float joint_angles[SF64_ARWING_MAX_LIMBS + 1U][3];
+    u32 skeleton_limb_count;
+    u32 animation_limb_count;
+    u32 root_joint_index;
+    Sf64ArwingLimb root_limb;
+    Sf64ArwingMatrix projection;
+    Sf64ArwingMatrix view;
+    Sf64ArwingBuilder builder;
+    u32 object_index = 0U;
+    u32 arwing_index;
+
+    if (!task || !rdram || !state || !arwing_segment || !title_segment ||
+        arwing_segment_size < SF64_ARWING_SEGMENT_SIZE ||
+        rdram_size < SF64_ARWING_RDRAM_REQUIRED_SIZE ||
+        SF64_TITLE_SEGMENT_RDRAM_OFFSET + title_segment_size > rdram_size) {
+        return -1;
+    }
+
+    memset(rdram, 0, rdram_size);
+    memcpy(rdram + SF64_ARWING_SEGMENT_RDRAM_OFFSET, arwing_segment,
+           SF64_ARWING_SEGMENT_SIZE);
+    memcpy(rdram + SF64_TITLE_SEGMENT_RDRAM_OFFSET, title_segment,
+           title_segment_size);
+
+    if (skeleton_read(arwing_segment, arwing_segment_size, SF64_ARWING_SEGMENT_ID,
+                      skeleton, &skeleton_limb_count) != 0 ||
+        animation_read(arwing_segment, arwing_segment_size,
+                       &animation_limb_count, joint_angles) != 0 ||
+        skeleton_limb_count != animation_limb_count ||
+        limb_read(&(Sf64ArwingBuilder){ .segment = arwing_segment,
+                                        .segment_size = arwing_segment_size,
+                                        .segment_id = SF64_ARWING_SEGMENT_ID },
+                  skeleton[0], &root_limb) != 0 ||
+        find_joint_index(&(Sf64ArwingBuilder){ .skeleton = skeleton },
+                         skeleton[0], &root_joint_index) != 0) {
+        return -1;
+    }
+
+    matrix_perspective(projection);
+    matrix_look_at(view, state->eye[0], state->eye[1], state->eye[2],
+                   state->at[0], state->at[1], state->at[2],
+                   state->up[0], state->up[1], state->up[2]);
+    matrix_write_n64(rdram + SF64_TAKEOFF_PROJECTION_OFFSET, projection);
+    matrix_write_n64(rdram + SF64_TAKEOFF_VIEW_OFFSET, view);
+    takeoff_write_light(rdram, SF64_TAKEOFF_LIGHT_OFFSET, state, 0);
+    takeoff_write_light(rdram, SF64_TAKEOFF_LIGHT_OFFSET + 0x20U, state, 1);
+
+    memset(&builder, 0, sizeof(builder));
+    builder.segment = arwing_segment;
+    builder.segment_size = arwing_segment_size;
+    builder.segment_id = SF64_ARWING_SEGMENT_ID;
+    builder.matrix_offset = SF64_TAKEOFF_MATRIX_OFFSET;
+    builder.matrix_address = SF64_TAKEOFF_MATRIX_ADDRESS;
+    builder.skeleton = skeleton;
+    builder.joint_angles = joint_angles;
+    builder.rdram = rdram;
+
+    list_append(&builder, SF64_ARWING_G_MOVEWORD_SEGMENT,
+                SF64_ARWING_SEGMENT_ADDRESS);
+    list_append(&builder, 0xbc001806U, SF64_TITLE_SEGMENT_RDRAM_OFFSET |
+                                           0x80000000U);
+    list_append(&builder, SF64_ARWING_G_MTX_PROJECTION_LOAD,
+                SF64_TAKEOFF_PROJECTION_ADDRESS);
+    list_append(&builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                SF64_TAKEOFF_VIEW_ADDRESS);
+    list_append(&builder, SF64_ARWING_G_MOVEWORD_NUMLIGHT, 0x00000040U);
+    list_append(&builder, SF64_ARWING_G_TEXTURE, 0xffffffffU);
+    list_append(&builder, SF64_ARWING_G_SETGEOMETRYMODE,
+                SF64_ARWING_G_LIGHTING_ZBUFFER);
+    list_append(&builder, SF64_ARWING_G_MOVEMEM_LIGHT,
+                SF64_TAKEOFF_LIGHT_ADDRESS);
+    list_append(&builder, SF64_ARWING_G_MOVEMEM_AMBIENT,
+                SF64_TAKEOFF_LIGHT_ADDRESS + 16U);
+
+    {
+        Sf64ArwingMatrix deck;
+        memcpy(deck, view, sizeof(deck));
+        matrix_translate(deck, 0.0f, state->deck_offset_y,
+                         state->deck_offset_z);
+        matrix_scale(deck, 0.4f, 0.4f, 0.4f);
+        matrix_write_n64(rdram + SF64_TAKEOFF_OBJECT_MATRIX_OFFSET, deck);
+        list_append(&builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                    SF64_TAKEOFF_OBJECT_MATRIX_ADDRESS);
+        list_append(&builder, SF64_ARWING_G_DL, SF64_TAKEOFF_DECK_DL);
+
+        if (state->platform_visible) {
+            Sf64ArwingMatrix platform;
+            memcpy(platform, deck, sizeof(platform));
+            matrix_translate(platform, 401.0f, -249.0f, -22.0f);
+            matrix_write_n64(rdram + SF64_TAKEOFF_OBJECT_MATRIX_OFFSET + 64U,
+                             platform);
+            list_append(&builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                        SF64_TAKEOFF_OBJECT_MATRIX_ADDRESS + 64U);
+            list_append(&builder, SF64_ARWING_G_DL,
+                        SF64_TAKEOFF_DECK_PLATFORM_DL);
+        }
+    }
+    object_index = 2U;
+
+    for (arwing_index = 4U; arwing_index > 0U; arwing_index--) {
+        u32 index = arwing_index - 1U;
+        Sf64ArwingMatrix launcher;
+        if (!state->arwing[index].draw) {
+            continue;
+        }
+        memcpy(launcher, view, sizeof(launcher));
+        matrix_translate(launcher, state->arwing[index].position[0], -12.8f,
+                         state->deck_launcher_zpos);
+        matrix_scale(launcher, 0.8f, 0.8f, 0.8f);
+        matrix_write_n64(rdram + SF64_TAKEOFF_OBJECT_MATRIX_OFFSET +
+                             object_index * 64U,
+                         launcher);
+        list_append(&builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                    SF64_TAKEOFF_OBJECT_MATRIX_ADDRESS + object_index * 64U);
+        list_append(&builder, SF64_ARWING_G_DL, SF64_TAKEOFF_DECK_LAUNCHER_DL);
+        object_index++;
+    }
+
+    list_append(&builder, SF64_ARWING_G_MOVEMEM_LIGHT,
+                SF64_TAKEOFF_LIGHT_ADDRESS + 0x20U);
+    list_append(&builder, SF64_ARWING_G_MOVEMEM_AMBIENT,
+                SF64_TAKEOFF_LIGHT_ADDRESS + 0x30U);
+
+    for (arwing_index = 0U; arwing_index < 4U; arwing_index++) {
+        if (!state->arwing[arwing_index].draw) {
+            continue;
+        }
+        if (takeoff_emit_arwing(&builder, &root_limb, root_joint_index,
+                                &state->arwing[arwing_index], view) != 0) {
+            return -1;
+        }
+    }
+
+    {
+        u32 shadow_slot = 10U;
+        int shadow_started = 0;
+        for (arwing_index = 0U; arwing_index < 4U; arwing_index++) {
+            if (!state->arwing[arwing_index].draw ||
+                !state->arwing[arwing_index].draw_shadow) {
+                continue;
+            }
+            if (!shadow_started) {
+                takeoff_setup_shadow(&builder, title_segment, rdram);
+                shadow_started = 1;
+            }
+            takeoff_append_shadow(&builder, &state->arwing[arwing_index],
+                                  state, view, shadow_slot);
+            shadow_slot++;
+        }
+    }
+
+    {
+        u32 glow_slot = 6U;
+        int glow_started = 0;
+        for (arwing_index = 0U; arwing_index < 4U; arwing_index++) {
+            if (!state->arwing[arwing_index].draw ||
+                !state->arwing[arwing_index].engine_glow) {
+                continue;
+            }
+            if (!glow_started) {
+                takeoff_setup_engine_glow(&builder, title_segment, rdram);
+                glow_started = 1;
+            }
+            takeoff_append_engine_glow(&builder, &state->arwing[arwing_index],
+                                       state->eye, view, glow_slot);
+            glow_slot++;
+        }
+    }
+
+    if (state->card_state == 1) {
+        takeoff_append_card(&builder, title_segment, rdram);
+    }
+    takeoff_append_flash(&builder, state, rdram);
+
+    list_append(&builder, SF64_ARWING_G_ENDDL, 0U);
+
+    memset(task, 0, sizeof(*task));
+    task->kind = N64PS3_GFX_TASK_DISPLAY_LIST;
+    task->dram_base = rdram;
+    task->dram_size_bytes = rdram_size;
+    task->display_list = rdram + SF64_TAKEOFF_ROOT_OFFSET;
+    task->display_list_size_bytes =
+        builder.root_command_count * SF64_ARWING_GFX_COMMAND_BYTES;
+    task->debug_name = "SF64 opening takeoff";
+    return 0;
+}
+
+#define SF64_SPACE_GREAT_FOX_OFFSET 0x0007d000U
+#define SF64_SPACE_GREAT_FOX_ADDRESS 0x8007d000U
+#define SF64_SPACE_CORNERIA_DL 0x06037cf0U
+#define SF64_SPACE_GREAT_FOX_DL 0x0e000000U
+#define SF64_SPACE_GLOW_TEXTURE_OFFSET 0x0008f000U
+#define SF64_SPACE_GLOW_VERTEX_OFFSET 0x0008ef00U
+#define SF64_SPACE_GLOW_SEGMENT_OFFSET 0x00032178U
+
+static void space_write_light(uint8_t *rdram, uint32_t offset,
+                              const Sf64SpaceState *state, int factor)
+{
+    uint8_t *light = rdram + offset;
+    uint8_t *ambient = light + 16;
+
+    memset(light, 0, 16);
+    memset(ambient, 0, 16);
+    light[0] = (uint8_t)((state->light1_r * factor) / 255);
+    light[1] = (uint8_t)((state->light1_g * factor) / 255);
+    light[2] = (uint8_t)((state->light1_b * factor) / 255);
+    light[8] = (uint8_t)((int32_t)state->light_dir[0] & 0xff);
+    light[9] = (uint8_t)((int32_t)state->light_dir[1] & 0xff);
+    light[10] = (uint8_t)((int32_t)state->light_dir[2] & 0xff);
+    ambient[0] = (uint8_t)((state->ambient_r * factor) / 255);
+    ambient[1] = (uint8_t)((state->ambient_g * factor) / 255);
+    ambient[2] = (uint8_t)((state->ambient_b * factor) / 255);
+}
+
+static void space_append_orb(Sf64ArwingBuilder *builder,
+                             Sf64ArwingMatrix base,
+                             const float position[3],
+                             float scale,
+                             unsigned red,
+                             unsigned green,
+                             unsigned blue,
+                             unsigned alpha,
+                             uint8_t *vertices,
+                             uint32_t slot)
+{
+    Sf64ArwingMatrix matrix;
+    unsigned i;
+
+    memcpy(matrix, base, sizeof(matrix));
+    matrix_translate(matrix, position[0], position[1], position[2]);
+    matrix_scale(matrix, scale, scale, 1.0f);
+    matrix_write_n64(builder->rdram + SF64_TAKEOFF_OBJECT_MATRIX_OFFSET +
+                         slot * 64U,
+                     matrix);
+    list_append(builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                SF64_TAKEOFF_OBJECT_MATRIX_ADDRESS + slot * 64U);
+    takeoff_write_vertex3(vertices, -40, 40, 0, 0, 0);
+    takeoff_write_vertex3(vertices + 16U, -40, -40, 0, 0, 1024);
+    takeoff_write_vertex3(vertices + 32U, 40, -40, 0, 1024, 1024);
+    takeoff_write_vertex3(vertices + 48U, 40, 40, 0, 1024, 0);
+    for (i = 0; i < 4U; i++) {
+        vertices[i * 16U + 12U] = (uint8_t)red;
+        vertices[i * 16U + 13U] = (uint8_t)green;
+        vertices[i * 16U + 14U] = (uint8_t)blue;
+        vertices[i * 16U + 15U] = (uint8_t)alpha;
+    }
+    list_append(builder, SF64_TAKEOFF_G_VTX | (4U << 10) | (4U * 16U - 1U),
+                0x80000000U | SF64_SPACE_GLOW_VERTEX_OFFSET);
+    list_append(builder, SF64_TAKEOFF_G_TRI1, 0x00000204U);
+    list_append(builder, SF64_TAKEOFF_G_TRI1, 0x00000406U);
+}
+
+static void space_append_orbs(Sf64ArwingBuilder *builder,
+                              Sf64ArwingMatrix base,
+                              const Sf64SpaceState *state,
+                              uint8_t *rdram)
+{
+    static const float positions3[4][3] = {
+        { -1373.0f, 484.0f, -374.0f },
+        { 1373.0f, 484.0f, -374.0f },
+        { -1373.0f, -704.0f, -374.0f },
+        { 1373.0f, -704.0f, -374.0f }
+    };
+    static const float positions1[3][3] = {
+        { 0.0f, 40.0f, -2278.0f },
+        { 295.0f, -92.0f, -1301.0f },
+        { -295.0f, -92.0f, -1301.0f }
+    };
+    static const float blink_scale[8] = {
+        0.15f, 0.45f, 0.75f, 1.3f, 0.75f, 0.45f, 0.15f, 0.0f
+    };
+    const uint8_t *source = rdram + SF64_TITLE_SEGMENT_RDRAM_OFFSET +
+                            SF64_SPACE_GLOW_SEGMENT_OFFSET;
+    uint8_t *texture = rdram + SF64_SPACE_GLOW_TEXTURE_OFFSET;
+    uint8_t *vertices = rdram + SF64_SPACE_GLOW_VERTEX_OFFSET;
+    uint32_t frame = (uint32_t)(state->timer3 < 0 ? 0 : state->timer3);
+    uint32_t pixel;
+    uint32_t i;
+
+    for (pixel = 0; pixel < 32U * 32U; pixel++) {
+        uint8_t ia8 = source[pixel];
+        uint8_t intensity = (uint8_t)((ia8 >> 4) * 17U);
+
+        texture[pixel * 4U] = intensity;
+        texture[pixel * 4U + 1U] = intensity;
+        texture[pixel * 4U + 2U] = intensity;
+        texture[pixel * 4U + 3U] = (uint8_t)((ia8 & 0x0fU) * 17U);
+    }
+
+    list_append(builder, SF64_TAKEOFF_G_CLEARGEOMETRYMODE,
+                SF64_TAKEOFF_CLEAR_GEOMETRY_BITS);
+    list_append(builder, SF64_ARWING_G_TEXTURE, 0xffffffffU);
+    list_append(builder, SF64_TAKEOFF_G_SETOTHERMODE_H,
+                SF64_TAKEOFF_TEXTURE_FILTER_BILERP);
+    list_append(builder, SF64_TAKEOFF_G_SETOTHERMODE_L,
+                SF64_TAKEOFF_RENDER_MODE_XLU);
+    list_append(builder, SF64_TAKEOFF_G_MOVEWORD_SEGMENT7,
+                0x80000000U | SF64_SPACE_GLOW_TEXTURE_OFFSET);
+    list_append(builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_SETTIMG_RGBA32 | 31U, 0x07000000U);
+    list_append(builder, SF64_TAKEOFF_G_SETTILE_RGBA32,
+                (SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24) |
+                    SF64_TAKEOFF_TEXTURE_CLAMP_ST);
+    list_append(builder, SF64_TAKEOFF_G_LOADSYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_LOADBLOCK,
+                (SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24) |
+                    ((32U * 32U - 1U) << 12));
+    list_append(builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(builder, SF64_TAKEOFF_G_SETTILE_RGBA32 | (16U << 9),
+                SF64_TAKEOFF_TEXTURE_CLAMP_ST);
+    list_append(builder, SF64_TAKEOFF_G_SETTILESIZE, (124U << 12) | 124U);
+
+    for (i = 0; i < 4U; i++) {
+        float scale = 0.0f;
+        unsigned red = i < 2U ? 255U : 32U;
+        unsigned blue = i < 2U ? 32U : 255U;
+
+        if (i < 2U) {
+            if ((frame & 0x38U) == 0U) {
+                scale = blink_scale[frame % 8U];
+            }
+        } else {
+            if (((frame + 32U) & 0x38U) == 0U) {
+                scale = blink_scale[frame % 8U];
+            }
+        }
+        if (scale <= 0.0f) {
+            continue;
+        }
+        space_append_orb(builder, base, positions3[i], scale, red, 32U, blue,
+                         128U, vertices, 2U + i);
+    }
+
+    for (i = 0; i < 3U; i++) {
+        float scale = (frame & 1U) ? 5.2f : 5.0f;
+
+        space_append_orb(builder, base, positions1[i], scale, 255U, 255U, 0U,
+                         48U, vertices, 6U + i);
+    }
+}
+
+int sf64_space_build_task(N64ps3GfxTask *task,
+                          uint8_t *rdram,
+                          uint32_t rdram_size,
+                          const uint8_t *arwing_segment,
+                          uint32_t arwing_segment_size,
+                          const uint8_t *title_segment,
+                          uint32_t title_segment_size,
+                          const uint8_t *great_fox_segment,
+                          uint32_t great_fox_segment_size,
+                          const Sf64SpaceState *state)
+{
+    const float degrees_to_radians = SF64_ARWING_TWO_PI / 360.0f;
+    u32 skeleton[SF64_ARWING_MAX_LIMBS];
+    float joint_angles[SF64_ARWING_MAX_LIMBS + 1U][3];
+    u32 skeleton_limb_count;
+    u32 animation_limb_count;
+    u32 root_joint_index;
+    Sf64ArwingLimb root_limb;
+    Sf64ArwingMatrix projection;
+    Sf64ArwingMatrix view;
+    Sf64ArwingMatrix object;
+    Sf64ArwingBuilder builder;
+    u32 arwing_index;
+    int fade_factor;
+
+    if (!task || !rdram || !state || !arwing_segment || !title_segment ||
+        !great_fox_segment ||
+        arwing_segment_size < SF64_ARWING_SEGMENT_SIZE ||
+        rdram_size < SF64_ARWING_RDRAM_REQUIRED_SIZE ||
+        SF64_TITLE_SEGMENT_RDRAM_OFFSET + title_segment_size > rdram_size ||
+        SF64_SPACE_GREAT_FOX_OFFSET + great_fox_segment_size > rdram_size) {
+        return -1;
+    }
+
+    memset(rdram, 0, rdram_size);
+    memcpy(rdram + SF64_ARWING_SEGMENT_RDRAM_OFFSET, arwing_segment,
+           SF64_ARWING_SEGMENT_SIZE);
+    memcpy(rdram + SF64_TITLE_SEGMENT_RDRAM_OFFSET, title_segment,
+           title_segment_size);
+    memcpy(rdram + SF64_SPACE_GREAT_FOX_OFFSET, great_fox_segment,
+           great_fox_segment_size);
+
+    if (skeleton_read(arwing_segment, arwing_segment_size,
+                      SF64_ARWING_SEGMENT_ID, skeleton,
+                      &skeleton_limb_count) != 0 ||
+        animation_read(arwing_segment, arwing_segment_size,
+                       &animation_limb_count, joint_angles) != 0 ||
+        skeleton_limb_count != animation_limb_count ||
+        limb_read(&(Sf64ArwingBuilder){ .segment = arwing_segment,
+                                        .segment_size = arwing_segment_size,
+                                        .segment_id = SF64_ARWING_SEGMENT_ID },
+                  skeleton[0], &root_limb) != 0 ||
+        find_joint_index(&(Sf64ArwingBuilder){ .skeleton = skeleton },
+                         skeleton[0], &root_joint_index) != 0) {
+        return -1;
+    }
+
+    matrix_perspective(projection);
+    matrix_look_at(view, state->eye[0], state->eye[1], state->eye[2],
+                   state->at[0], state->at[1], state->at[2],
+                   state->up[0], state->up[1], state->up[2]);
+    matrix_write_n64(rdram + SF64_TAKEOFF_PROJECTION_OFFSET, projection);
+    matrix_write_n64(rdram + SF64_TAKEOFF_VIEW_OFFSET, view);
+
+    fade_factor = 255 - state->fill_alpha;
+    if (fade_factor < 0) {
+        fade_factor = 0;
+    }
+    space_write_light(rdram, SF64_TAKEOFF_LIGHT_OFFSET, state, fade_factor);
+
+    memset(&builder, 0, sizeof(builder));
+    builder.segment = arwing_segment;
+    builder.segment_size = arwing_segment_size;
+    builder.segment_id = SF64_ARWING_SEGMENT_ID;
+    builder.matrix_offset = SF64_TAKEOFF_MATRIX_OFFSET;
+    builder.matrix_address = SF64_TAKEOFF_MATRIX_ADDRESS;
+    builder.skeleton = skeleton;
+    builder.joint_angles = joint_angles;
+    builder.rdram = rdram;
+
+    list_append(&builder, SF64_ARWING_G_MOVEWORD_SEGMENT,
+                SF64_ARWING_SEGMENT_ADDRESS);
+    list_append(&builder, 0xbc001806U, SF64_TITLE_SEGMENT_RDRAM_OFFSET |
+                                           0x80000000U);
+    list_append(&builder, 0xbc003806U, SF64_SPACE_GREAT_FOX_ADDRESS);
+    list_append(&builder, SF64_ARWING_G_MTX_PROJECTION_LOAD,
+                SF64_TAKEOFF_PROJECTION_ADDRESS);
+    list_append(&builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                SF64_TAKEOFF_VIEW_ADDRESS);
+    list_append(&builder, SF64_ARWING_G_MOVEWORD_NUMLIGHT, 0x00000040U);
+    list_append(&builder, SF64_ARWING_G_TEXTURE, 0xffffffffU);
+    list_append(&builder, SF64_ARWING_G_SETGEOMETRYMODE,
+                SF64_ARWING_G_LIGHTING_ZBUFFER);
+    list_append(&builder, SF64_ARWING_G_MOVEMEM_LIGHT,
+                SF64_TAKEOFF_LIGHT_ADDRESS);
+    list_append(&builder, SF64_ARWING_G_MOVEMEM_AMBIENT,
+                SF64_TAKEOFF_LIGHT_ADDRESS + 16U);
+
+    if (state->corneria_draw) {
+        float camera_x = state->eye[0] - state->at[0];
+        float camera_y = state->eye[1] - state->at[1];
+        float camera_z = state->eye[2] - state->at[2];
+        float camera_xrot = -atan2f(camera_y,
+                                    sqrtf(camera_x * camera_x +
+                                          camera_z * camera_z));
+        float camera_yrot = atan2f(camera_x, camera_z);
+
+        memcpy(object, view, sizeof(object));
+        matrix_translate(object, state->corneria_position[0],
+                         state->corneria_position[1],
+                         state->eye[2] + 1000.0f);
+        matrix_rotate_y(object, camera_yrot);
+        matrix_rotate_x(object, camera_xrot);
+        matrix_scale(object, state->corneria_scale, state->corneria_scale,
+                     state->corneria_scale);
+        matrix_write_n64(rdram + SF64_TAKEOFF_OBJECT_MATRIX_OFFSET, object);
+        list_append(&builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                    SF64_TAKEOFF_OBJECT_MATRIX_ADDRESS);
+        list_append(&builder, SF64_ARWING_G_DL, SF64_SPACE_CORNERIA_DL);
+    }
+
+    memcpy(object, view, sizeof(object));
+    matrix_translate(object, state->great_fox_position[0],
+                     state->great_fox_position[1],
+                     state->great_fox_position[2]);
+    matrix_rotate_z(object, state->great_fox_rotation[2] * degrees_to_radians);
+    matrix_rotate_x(object, state->great_fox_rotation[0] * degrees_to_radians);
+    matrix_rotate_y(object, state->great_fox_rotation[1] * degrees_to_radians);
+    matrix_scale(object, state->great_fox_scale, state->great_fox_scale,
+                 state->great_fox_scale);
+    matrix_write_n64(rdram + SF64_TAKEOFF_OBJECT_MATRIX_OFFSET + 64U, object);
+    list_append(&builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                SF64_TAKEOFF_OBJECT_MATRIX_ADDRESS + 64U);
+    list_append(&builder, SF64_ARWING_G_DL, SF64_SPACE_GREAT_FOX_DL);
+
+    for (arwing_index = 0U; arwing_index < 4U; arwing_index++) {
+        if (!state->arwing[arwing_index].draw) {
+            continue;
+        }
+        if (takeoff_emit_arwing(&builder, &root_limb, root_joint_index,
+                                &state->arwing[arwing_index], view) != 0) {
+            return -1;
+        }
+    }
+
+    space_append_orbs(&builder, object, state, rdram);
+
+    list_append(&builder, SF64_ARWING_G_ENDDL, 0U);
+
+    memset(task, 0, sizeof(*task));
+    task->kind = N64PS3_GFX_TASK_DISPLAY_LIST;
+    task->dram_base = rdram;
+    task->dram_size_bytes = rdram_size;
+    task->display_list = rdram + SF64_TAKEOFF_ROOT_OFFSET;
+    task->display_list_size_bytes =
+        builder.root_command_count * SF64_ARWING_GFX_COMMAND_BYTES;
+    task->debug_name = "SF64 opening space";
+    return 0;
+}
+
+#define SF64_TEAM_CARD_TEXTURE_OFFSET 0x00085000U
+#define SF64_TEAM_CARD_VERTEX_OFFSET 0x00087400U
+#define SF64_TEAM_CARD_ORTHO_OFFSET 0x00008600U
+#define SF64_TEAM_CARD_IDENTITY_OFFSET 0x00008640U
+#define SF64_TEAM_CARD_ORTHO_ADDRESS 0x80008600U
+#define SF64_TEAM_CARD_IDENTITY_ADDRESS 0x80008640U
+
+static void team_card_ortho_matrix(Sf64ArwingMatrix matrix)
+{
+    float scale_x;
+    float scale_y;
+
+    memset(matrix, 0, sizeof(Sf64ArwingMatrix));
+    sf64_display_fit_4_3(sf64_display_aspect(), &scale_x, &scale_y);
+    matrix[0][0] = (2.0f / 320.0f) * scale_x;
+    matrix[1][1] = (-2.0f / 240.0f) * scale_y;
+    matrix[2][2] = 1.0f;
+    matrix[3][0] = -scale_x;
+    matrix[3][1] = scale_y;
+    matrix[3][3] = 1.0f;
+}
+
+static int team_running_append_card(N64ps3GfxTask *task, const u8 *title,
+                                    u32 title_size, int team_index,
+                                    u8 *rdram)
+{
+    static const uint32_t offsets[4] = {
+        0x0000f940U, 0x00010090U, 0x000106b0U, 0x00010fa0U
+    };
+    static const uint32_t widths[4] = { 144U, 120U, 176U, 176U };
+    static const float x_positions[4] = { 90.0f, 100.0f, 75.0f, 75.0f };
+    Sf64ArwingMatrix ortho;
+    Sf64ArwingMatrix identity;
+    Sf64ArwingBuilder builder;
+    uint8_t *texture = rdram + SF64_TEAM_CARD_TEXTURE_OFFSET;
+    uint8_t *vertices = rdram + SF64_TEAM_CARD_VERTEX_OFFSET;
+    uint32_t width;
+    uint32_t row_words;
+    uint32_t pixel;
+    uint32_t end_index;
+    int16_t x0;
+    int16_t x1;
+
+    if (team_index < 0 || team_index >= 4) {
+        return 0;
+    }
+    width = widths[team_index];
+    if (offsets[team_index] > title_size ||
+        width * 13U > title_size - offsets[team_index]) {
+        return -1;
+    }
+
+    for (pixel = 0; pixel < width * 13U; pixel++) {
+        uint8_t ia8 = title[offsets[team_index] + pixel];
+        uint8_t intensity = (uint8_t)((ia8 >> 4) * 17U);
+        uint8_t alpha = (uint8_t)((ia8 & 0x0fU) * 17U);
+
+        if (alpha <= 32U) {
+            alpha = 0U;
+        } else {
+            alpha = (uint8_t)((((uint32_t)(alpha - 32U) * 255U) + 111U) / 223U);
+        }
+        texture[pixel * 4U] = intensity;
+        texture[pixel * 4U + 1U] = intensity;
+        texture[pixel * 4U + 2U] = intensity;
+        texture[pixel * 4U + 3U] = alpha;
+    }
+
+    team_card_ortho_matrix(ortho);
+    matrix_identity(identity);
+    matrix_write_n64(rdram + SF64_TEAM_CARD_ORTHO_OFFSET, ortho);
+    matrix_write_n64(rdram + SF64_TEAM_CARD_IDENTITY_OFFSET, identity);
+
+    end_index = task->display_list_size_bytes / SF64_ARWING_GFX_COMMAND_BYTES;
+    if (end_index == 0U) {
+        return -1;
+    }
+    memset(&builder, 0, sizeof(builder));
+    builder.rdram = rdram;
+    builder.root_command_count = end_index - 1U;
+
+    list_append(&builder, SF64_ARWING_G_MTX_PROJECTION_LOAD,
+                SF64_TEAM_CARD_ORTHO_ADDRESS);
+    list_append(&builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                SF64_TEAM_CARD_IDENTITY_ADDRESS);
+    list_append(&builder, SF64_TAKEOFF_G_CLEARGEOMETRYMODE,
+                SF64_TAKEOFF_CLEAR_GEOMETRY_BITS);
+    list_append(&builder, SF64_ARWING_G_TEXTURE, 0xffffffffU);
+    list_append(&builder, SF64_TAKEOFF_G_SETOTHERMODE_H, 0x00000000U);
+    list_append(&builder, SF64_TAKEOFF_G_SETOTHERMODE_L,
+                SF64_TAKEOFF_RENDER_MODE_XLU);
+    list_append(&builder, SF64_TAKEOFF_G_MOVEWORD_SEGMENT7,
+                0x80000000U | SF64_TEAM_CARD_TEXTURE_OFFSET);
+    list_append(&builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(&builder, SF64_TAKEOFF_G_SETTIMG_RGBA32 | (width - 1U),
+                0x07000000U);
+    list_append(&builder, SF64_TAKEOFF_G_SETTILE_RGBA32,
+                (SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24) |
+                    SF64_TAKEOFF_TEXTURE_CLAMP_ST);
+    list_append(&builder, SF64_TAKEOFF_G_LOADSYNC, 0U);
+    list_append(&builder, SF64_TAKEOFF_G_LOADBLOCK,
+                (SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24) |
+                    ((width * 13U - 1U) << 12));
+    list_append(&builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    row_words = (width * 4U + 7U) / 8U;
+    list_append(&builder, SF64_TAKEOFF_G_SETTILE_RGBA32 | (row_words << 9),
+                SF64_TAKEOFF_TEXTURE_CLAMP_ST);
+    list_append(&builder, SF64_TAKEOFF_G_SETTILESIZE,
+                (((width - 1U) * 4U) << 12) | ((13U - 1U) * 4U));
+
+    x0 = (int16_t)x_positions[team_index];
+    x1 = (int16_t)(x_positions[team_index] + (float)width);
+    takeoff_write_vertex(vertices, x0, 210, 0, 0);
+    takeoff_write_vertex(vertices + 16U, x1, 210, (int16_t)(width * 32U), 0);
+    takeoff_write_vertex(vertices + 32U, x1, 223, (int16_t)(width * 32U),
+                         13 * 32);
+    takeoff_write_vertex(vertices + 48U, x0, 223, 0, 13 * 32);
+
+    list_append(&builder, SF64_TAKEOFF_G_VTX | (4U << 10) | (4U * 16U - 1U),
+                0x80000000U | SF64_TEAM_CARD_VERTEX_OFFSET);
+    list_append(&builder, SF64_TAKEOFF_G_TRI1, 0x00000204U);
+    list_append(&builder, SF64_TAKEOFF_G_TRI1, 0x00000406U);
+    list_append(&builder, SF64_ARWING_G_ENDDL, 0U);
+
+    task->display_list_size_bytes =
+        builder.root_command_count * SF64_ARWING_GFX_COMMAND_BYTES;
+    return 0;
+}
+
+#define SF64_TEAM_SHADOW_TEXTURE_OFFSET 0x00087600U
+#define SF64_TEAM_SHADOW_VERTEX_OFFSET 0x00088700U
+#define SF64_TEAM_SHADOW_MATRIX_OFFSET 0x0008f000U
+#define SF64_TEAM_SHADOW_MATRIX_ADDRESS 0x8008f000U
+#define SF64_TEAM_SHADOW_SEGMENT_OFFSET 0x000410f8U
+
+static int team_running_append_shadows(N64ps3GfxTask *task,
+                                       const Sf64TitleTeamModel models[4],
+                                       const float eye[3], const float at[3],
+                                       const float up[3], float team_z_offset,
+                                       u8 *rdram)
+{
+    const uint8_t *source = rdram + SF64_TITLE_SEGMENT_RDRAM_OFFSET +
+                            SF64_TEAM_SHADOW_SEGMENT_OFFSET;
+    uint8_t *texture = rdram + SF64_TEAM_SHADOW_TEXTURE_OFFSET;
+    uint8_t *vertices = rdram + SF64_TEAM_SHADOW_VERTEX_OFFSET;
+    Sf64ArwingMatrix view;
+    Sf64ArwingMatrix matrix;
+    Sf64ArwingBuilder builder;
+    uint32_t pixel;
+    uint32_t end_index;
+    uint32_t i;
+
+    for (pixel = 0; pixel < 32U * 32U; pixel++) {
+        uint16_t value = (uint16_t)(((uint16_t)source[pixel * 2U] << 8) |
+                                    source[pixel * 2U + 1U]);
+        uint8_t red = (uint8_t)((value >> 11) & 31U);
+        uint8_t green = (uint8_t)((value >> 6) & 31U);
+        uint8_t blue = (uint8_t)((value >> 1) & 31U);
+
+        texture[pixel * 4U] = (uint8_t)((red << 3) | (red >> 2));
+        texture[pixel * 4U + 1U] = (uint8_t)((green << 3) | (green >> 2));
+        texture[pixel * 4U + 2U] = (uint8_t)((blue << 3) | (blue >> 2));
+        texture[pixel * 4U + 3U] = (value & 1U) ? 128U : 0U;
+    }
+
+    takeoff_write_vertex3(vertices, -60, 0, 40, -1024, 1536);
+    takeoff_write_vertex3(vertices + 16U, 60, 0, 40, 2048, 1536);
+    takeoff_write_vertex3(vertices + 32U, 0, 0, -60, 512, -1024);
+    for (i = 0; i < 3U; i++) {
+        vertices[i * 16U + 15U] = 255U;
+    }
+
+    end_index = task->display_list_size_bytes / SF64_ARWING_GFX_COMMAND_BYTES;
+    if (end_index == 0U) {
+        return -1;
+    }
+    memset(&builder, 0, sizeof(builder));
+    builder.rdram = rdram;
+    builder.root_command_count = end_index - 1U;
+
+    matrix_look_at(view, eye[0], eye[1], eye[2], at[0], at[1], at[2], up[0],
+                   up[1], up[2]);
+
+    list_append(&builder, SF64_TAKEOFF_G_CLEARGEOMETRYMODE, 0x00020000U);
+    list_append(&builder, SF64_ARWING_G_TEXTURE, 0xffffffffU);
+    list_append(&builder, SF64_TAKEOFF_G_SETOTHERMODE_H,
+                SF64_TAKEOFF_TEXTURE_FILTER_BILERP);
+    list_append(&builder, SF64_TAKEOFF_G_SETOTHERMODE_L,
+                SF64_TAKEOFF_RENDER_MODE_XLU);
+    list_append(&builder, SF64_TAKEOFF_G_MOVEWORD_SEGMENT7,
+                0x80000000U | SF64_TEAM_SHADOW_TEXTURE_OFFSET);
+    list_append(&builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(&builder, SF64_TAKEOFF_G_SETTIMG_RGBA32 | 31U, 0x07000000U);
+    list_append(&builder, SF64_TAKEOFF_G_SETTILE_RGBA32,
+                (SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24) |
+                    SF64_TAKEOFF_TEXTURE_CLAMP_ST);
+    list_append(&builder, SF64_TAKEOFF_G_LOADSYNC, 0U);
+    list_append(&builder, SF64_TAKEOFF_G_LOADBLOCK,
+                (SF64_TAKEOFF_TEXTURE_TILE_LOAD << 24) |
+                    ((32U * 32U - 1U) << 12));
+    list_append(&builder, SF64_TAKEOFF_G_PIPESYNC, 0U);
+    list_append(&builder,
+                SF64_TAKEOFF_G_SETTILE_RGBA32 |
+                    (((32U * 4U + 7U) / 8U) << 9),
+                SF64_TAKEOFF_TEXTURE_CLAMP_ST);
+    list_append(&builder, SF64_TAKEOFF_G_SETTILESIZE, (124U << 12) | 124U);
+
+    for (i = 0; i < 4U; i++) {
+        memcpy(matrix, view, sizeof(matrix));
+        matrix_translate(matrix, models[i].position[0] - 5.0f, 5.0f,
+                         models[i].position[2] + 10.0f + team_z_offset);
+        matrix_scale(matrix, 3.0f, 3.0f, 3.0f);
+        matrix_write_n64(rdram + SF64_TEAM_SHADOW_MATRIX_OFFSET + i * 64U,
+                         matrix);
+        list_append(&builder, SF64_ARWING_G_MTX_MODELVIEW_LOAD,
+                    SF64_TEAM_SHADOW_MATRIX_ADDRESS + i * 64U);
+        list_append(&builder,
+                    SF64_TAKEOFF_G_VTX | (3U << 10) | (3U * 16U - 1U),
+                    0x80000000U | SF64_TEAM_SHADOW_VERTEX_OFFSET);
+        list_append(&builder, SF64_TAKEOFF_G_TRI1, 0x00000204U);
+    }
+
+    list_append(&builder, SF64_ARWING_G_ENDDL, 0U);
+    task->display_list_size_bytes =
+        builder.root_command_count * SF64_ARWING_GFX_COMMAND_BYTES;
+    return 0;
 }
