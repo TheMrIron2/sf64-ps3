@@ -1,12 +1,28 @@
 include make/common.mk
 
-.PHONY: host arwing-probe ps3 ps3-self ps3-fake-self ps3-arwing-self ps3-arwing-nodepth-self ps3-arwing-static-self clean
+.PHONY: host boot-probe arwing-probe option-probe controller-probe title-tools ps3 ps3-self ps3-fake-self ps3-boot-self ps3-arwing-self ps3-arwing-nodepth-self ps3-arwing-static-self clean
+
+title-tools:
+	@test -f game/tools/Torch/CMakeLists.txt || { \
+		printf '%s\n' 'Initialize Torch: git submodule update --init game/tools/Torch'; exit 1; }
+	cmake -S game/tools/Torch -B build/tools/torch -DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -Wno-dev
+	cmake --build build/tools/torch --parallel 4
 
 host:
 	$(MAKE) -f make/host.mk
 
+boot-probe:
+	$(MAKE) -f make/host.mk boot-probe
+
 arwing-probe:
 	$(MAKE) -f make/host.mk arwing-probe
+
+controller-probe:
+	$(MAKE) -f make/host.mk controller-probe
+
+option-probe:
+	$(MAKE) -f make/host.mk option-probe
 
 ps3:
 	$(MAKE) -f make/ps3.mk
@@ -16,6 +32,10 @@ ps3-self:
 
 ps3-fake-self:
 	$(MAKE) -f make/ps3.mk fake-self
+
+ps3-boot-self:
+	$(MAKE) -f make/ps3.mk self BUILD_ROOT=build/boot \
+		SF64_PS3_TARGET=sf64_ps3_boot SF64_PS3_ARWING=1 SF64_PS3_BOOT=1
 
 ps3-arwing-self:
 	$(MAKE) -f make/ps3.mk self \

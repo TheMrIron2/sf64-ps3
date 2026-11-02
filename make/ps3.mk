@@ -16,8 +16,7 @@ PS3_SELF_INPUT_ELF := $(PS3_BUILD_DIR)/self/$(SF64_PS3_TARGET).elf
 PS3_OBJECTS := $(patsubst src/%.c,$(PS3_BUILD_DIR)/%.o,$(SF64_COMMON_C_FILES))
 PS3_SHADER_CACHE_DIR ?= $(PS3_N64PS3_BACKEND_BUILD_DIR)
 SF64_PS3_ARWING ?= 0
-SF64_PS3_ARWING_ROM ?= baserom.us.rev1.z64
-SF64_SOURCE_DIR ?= ../sf64-psp
+SF64_PS3_BOOT ?= 0
 
 PS3_N64PS3_OBJECTS := $(patsubst $(N64PS3_DIR)/%.c,$(PS3_BUILD_DIR)/n64ps3/%.o,$(N64PS3_C_FILES))
 PS3_DEPENDENCIES := $(PS3_OBJECTS:.o=.d) $(PS3_N64PS3_OBJECTS:.o=.d)
@@ -56,6 +55,8 @@ PS3_ORIGINAL_STARFIELD_C := $(PS3_BUILD_DIR)/original_title_starfield.c
 PS3_ORIGINAL_STARFIELD_OBJECT := $(PS3_BUILD_DIR)/original_title_starfield.o
 PS3_TITLE_RESOURCE_C := $(PS3_BUILD_DIR)/resources/ast_title.c
 PS3_TITLE_RESOURCE_OBJECT := $(PS3_BUILD_DIR)/resources/ast_title.o
+PS3_OPTION_RESOURCE_C := $(PS3_BUILD_DIR)/resources/ast_option.c
+PS3_OPTION_RESOURCE_OBJECT := $(PS3_BUILD_DIR)/resources/ast_option.o
 PS3_ORIGINAL_TITLE_LOGIC_C := $(PS3_BUILD_DIR)/original_title_logic.c
 PS3_ORIGINAL_TITLE_LOGIC_OBJECT := $(PS3_BUILD_DIR)/original_title_logic.o
 PS3_TITLE_RUNTIME_OBJECT := $(PS3_BUILD_DIR)/sf64_title_runtime.o
@@ -70,17 +71,30 @@ PS3_ORIGINAL_TITLE_SOURCE_FILES := \
 	$(SF64_SOURCE_DIR)/src/sys/sys_memory.c \
 	$(SF64_SOURCE_DIR)/assets/yaml/us/rev1/ast_title.yaml
 PS3_ORIGINAL_TITLE_CPPFLAGS := \
+	-I$(SF64_ASSET_HEADERS) \
 	-I$(SF64_SOURCE_DIR)/include \
 	-I$(SF64_SOURCE_DIR) \
 	-I$(SF64_SOURCE_DIR)/src \
 	-I$(SF64_SOURCE_DIR)/src/overlays/ovl_menu \
 	-D_LANGUAGE_C -D_MIPS_SZLONG=32
 PS3_OBJECTS += $(PS3_ARWING_RESOURCE_OBJECT) $(PS3_TITLE_RESOURCE_OBJECT) \
+	$(PS3_OPTION_RESOURCE_OBJECT) \
 	$(PS3_TITLE_STARFIELD_OBJECT) $(PS3_ORIGINAL_STARFIELD_OBJECT) \
 	$(PS3_ORIGINAL_TITLE_LOGIC_OBJECT) $(PS3_TITLE_RUNTIME_OBJECT)
 PS3_DEPENDENCIES += $(PS3_TITLE_STARFIELD_OBJECT:.o=.d) \
 	$(PS3_ORIGINAL_STARFIELD_OBJECT:.o=.d) \
 	$(PS3_ORIGINAL_TITLE_LOGIC_OBJECT:.o=.d) $(PS3_TITLE_RUNTIME_OBJECT:.o=.d)
+endif
+
+ifeq ($(SF64_PS3_BOOT),1)
+PS3_CPPFLAGS += -DSF64_PS3_BOOT_PROBE=1
+PS3_BOOT_RESOURCE_C := $(PS3_BUILD_DIR)/resources/ast_logo.c
+PS3_BOOT_RESOURCE_OBJECT := $(PS3_BUILD_DIR)/resources/ast_logo.o
+PS3_OPENING_SOURCE := $(PS3_BUILD_DIR)/original_opening.c
+PS3_OPENING_OBJECT := $(PS3_BUILD_DIR)/original_opening.o
+PS3_GREAT_FOX_C := $(PS3_BUILD_DIR)/resources/ast_great_fox.c
+PS3_GREAT_FOX_OBJECT := $(PS3_BUILD_DIR)/resources/ast_great_fox.o
+PS3_OBJECTS += $(PS3_BOOT_RESOURCE_OBJECT) $(PS3_OPENING_OBJECT) $(PS3_GREAT_FOX_OBJECT)
 endif
 
 PSL1GHT_PPU_MACHDEP ?= -mhard-float -fmodulo-sched -ffunction-sections -fdata-sections
@@ -92,6 +106,8 @@ PS3_LDFLAGS += -Wl,--gc-sections
 endif
 N64PS3_PS3_LDLIBS ?= -lgcm_sys -lrsx -lio -lsysutil -lm -lrt -llv2
 PS3_LDLIBS ?=
+
+include make/sf64_assets.mk
 
 -include $(PS3_DEPENDENCIES)
 
@@ -187,7 +203,7 @@ check-original-title-source:
 	   [ ! -f "$(SF64_SOURCE_DIR)/src/sys/sys_memory.c" ] || \
 	   [ ! -f "$(SF64_SOURCE_DIR)/assets/yaml/us/rev1/ast_title.yaml" ]; then \
 		printf '%s\n' "error: original SF64 source not found under $(SF64_SOURCE_DIR)."; \
-		printf '%s\n' "set SF64_SOURCE_DIR to the local sf64-psp source checkout."; \
+		printf '%s\n' "restore game/ or set SF64_SOURCE_DIR to an SF64 source checkout."; \
 		exit 2; \
 	fi
 
@@ -226,15 +242,15 @@ $(PS3_BUILD_DIR)/%.o: src/%.c
 	$(PPU_CC) $(PS3_CPPFLAGS) $(PS3_CFLAGS) -c -o $@ $<
 
 ifeq ($(SF64_PS3_ARWING),1)
-$(PS3_TITLE_STARFIELD_OBJECT): src/sf64_title_starfield.c | check-original-title-source
+$(PS3_TITLE_STARFIELD_OBJECT): src/sf64_title_starfield.c $(SF64_ASSET_STAMP) | check-original-title-source
 	@mkdir -p $(dir $@)
 	$(PPU_CC) $(PS3_CPPFLAGS) $(PS3_ORIGINAL_TITLE_CPPFLAGS) $(PS3_CFLAGS) -w -c -o $@ $<
 
 $(PS3_ORIGINAL_STARFIELD_C): $(PS3_ORIGINAL_TITLE_SOURCE_FILES) tools/extract_title_starfield_source.py | check-original-title-source
 	@mkdir -p $(dir $@)
-	$(PYTHON) tools/extract_title_starfield_source.py --sf64-source-dir $(SF64_SOURCE_DIR) --output $@
+	$(PYTHON) -B tools/extract_title_starfield_source.py --sf64-source-dir $(SF64_SOURCE_DIR) --output $@
 
-$(PS3_ORIGINAL_STARFIELD_OBJECT): $(PS3_ORIGINAL_STARFIELD_C)
+$(PS3_ORIGINAL_STARFIELD_OBJECT): $(PS3_ORIGINAL_STARFIELD_C) $(SF64_ASSET_STAMP)
 	$(PPU_CC) $(PS3_ORIGINAL_TITLE_CPPFLAGS) -D__cosf=cosf -D__sinf=sinf $(PS3_CFLAGS) -w -c -o $@ $<
 
 $(PS3_ORIGINAL_TITLE_LOGIC_C): $(SF64_SOURCE_DIR)/src/overlays/ovl_menu/fox_title.c \
@@ -244,12 +260,12 @@ $(PS3_ORIGINAL_TITLE_LOGIC_C): $(SF64_SOURCE_DIR)/src/overlays/ovl_menu/fox_titl
 		$(SF64_SOURCE_DIR)/assets/yaml/us/rev1/ast_title.yaml \
 		tools/extract_title_logic_source.py tools/extract_title_starfield_source.py | check-original-title-source
 	@mkdir -p $(dir $@)
-	$(PYTHON) tools/extract_title_logic_source.py --sf64-source-dir $(SF64_SOURCE_DIR) --output $@
+	$(PYTHON) -B tools/extract_title_logic_source.py --sf64-source-dir $(SF64_SOURCE_DIR) --output $@
 
-$(PS3_ORIGINAL_TITLE_LOGIC_OBJECT): $(PS3_ORIGINAL_TITLE_LOGIC_C)
+$(PS3_ORIGINAL_TITLE_LOGIC_OBJECT): $(PS3_ORIGINAL_TITLE_LOGIC_C) $(SF64_ASSET_STAMP)
 	$(PPU_CC) -Iinclude $(PS3_ORIGINAL_TITLE_CPPFLAGS) -DTARGET_PSP $(PS3_CFLAGS) -w -c -o $@ $<
 
-$(PS3_TITLE_RUNTIME_OBJECT): src/sf64_title_runtime.c include/sf64_ps3/title_runtime.h | check-original-title-source
+$(PS3_TITLE_RUNTIME_OBJECT): src/sf64_title_runtime.c include/sf64_ps3/title_runtime.h $(SF64_ASSET_STAMP) | check-original-title-source
 	$(PPU_CC) $(PS3_CPPFLAGS) $(PS3_ORIGINAL_TITLE_CPPFLAGS) -DTARGET_PSP $(PS3_CFLAGS) -w -c -o $@ $<
 endif
 
@@ -266,6 +282,36 @@ $(PS3_TITLE_RESOURCE_C): $(SF64_PS3_ARWING_ROM) tools/extract_title_bank.py
 	$(PYTHON) tools/extract_title_bank.py $< $@
 
 $(PS3_TITLE_RESOURCE_OBJECT): $(PS3_TITLE_RESOURCE_C)
+	$(PPU_CC) $(PS3_CPPFLAGS) $(PS3_CFLAGS) -c -o $@ $<
+
+ifeq ($(SF64_PS3_BOOT),1)
+$(PS3_BOOT_RESOURCE_C): $(SF64_PS3_ARWING_ROM) tools/extract_logo_bank.py tools/extract_title_bank.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) -B tools/extract_logo_bank.py $< $@
+
+$(PS3_BOOT_RESOURCE_OBJECT): $(PS3_BOOT_RESOURCE_C)
+	$(PPU_CC) $(PS3_CPPFLAGS) $(PS3_CFLAGS) -c -o $@ $<
+
+$(PS3_OPENING_SOURCE): $(SF64_SOURCE_DIR)/src/overlays/ovl_menu/fox_title.c $(SF64_SOURCE_DIR)/src/overlays/ovl_menu/fox_map.c $(SF64_SOURCE_DIR)/src/engine/fox_std_lib.c tools/extract_opening_logic.py tools/extract_title_starfield_source.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) -B tools/extract_opening_logic.py --source $(SF64_SOURCE_DIR) --output $@
+
+$(PS3_OPENING_OBJECT): $(PS3_OPENING_SOURCE) include/sf64_ps3/boot.h
+	$(PPU_CC) $(PS3_CPPFLAGS) $(PS3_CFLAGS) -w -c -o $@ $<
+
+$(PS3_GREAT_FOX_C): $(SF64_PS3_ARWING_ROM) tools/extract_great_fox_bank.py tools/extract_title_bank.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) -B tools/extract_great_fox_bank.py $< $@
+
+$(PS3_GREAT_FOX_OBJECT): $(PS3_GREAT_FOX_C)
+	$(PPU_CC) $(PS3_CPPFLAGS) $(PS3_CFLAGS) -c -o $@ $<
+endif
+
+$(PS3_OPTION_RESOURCE_C): $(SF64_PS3_ARWING_ROM) tools/extract_option_bank.py tools/extract_title_bank.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) -B tools/extract_option_bank.py --c-resource $< $@
+
+$(PS3_OPTION_RESOURCE_OBJECT): $(PS3_OPTION_RESOURCE_C)
 	$(PPU_CC) $(PS3_CPPFLAGS) $(PS3_CFLAGS) -c -o $@ $<
 endif
 

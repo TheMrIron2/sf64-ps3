@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Generate a narrow TU from the original SF64 title starfield functions.
 
-The SF64 source remains in its separate checkout. This extraction avoids
-linking unrelated functions and assets from the original large translation
-units. The output belongs under ignored build/.
+This extraction avoids linking unrelated functions and assets from the
+original large translation units. The output belongs under ignored build/.
 """
 
 from __future__ import annotations
@@ -159,6 +158,11 @@ def main() -> int:
         "    Background_DrawStarfield();",
         "}",
         "void sf64_original_title_starfield_draw(void) {",
+        "    Background_DrawStarfield();",
+        "}",
+        "void sf64_original_opening_starfield_update(const float eye[3], const float at[3], float speed) {",
+        "    Camera_SetStarfieldPos(eye[0], eye[1], eye[2], at[0], at[1], at[2]);",
+        "    gStarfieldScrollX -= speed;",
         "    Background_DrawStarfield();",
         "}",
         "",

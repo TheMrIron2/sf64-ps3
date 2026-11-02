@@ -72,7 +72,11 @@ int main(void)
 #endif
 #if defined(SF64_PS3_ARWING_PROBE)
         if (frame == 0) {
+#if defined(SF64_PS3_BOOT_PROBE)
+            printf("[sf64-ps3] rendering the original Nintendo boot logo\n");
+#else
             printf("[sf64-ps3] rendering original Arwing geometry through n64ps3\n");
+#endif
         }
         (void)sf64_platform_poll_controller();
         issues += sf64_note_status("original Arwing title task",

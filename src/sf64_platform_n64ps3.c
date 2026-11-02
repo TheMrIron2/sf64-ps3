@@ -4,6 +4,8 @@
 #include "sf64_ps3/title_ui.h"
 #include "sf64_ps3/title_starfield.h"
 #include "sf64_ps3/title_runtime.h"
+#include "sf64_ps3/controller.h"
+#include "sf64_ps3/boot.h"
 
 #include "n64ps3/n64ps3.h"
 #include "n64ps3/gfx_f3dex1.h"
@@ -11,23 +13,54 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(SF64_PS3_TARGET)
+#include <io/pad.h>
+#if defined(SF64_PS3_BOOT_PROBE)
+#include <lv2/systime.h>
+#endif
+#endif
+
 static OSMesgQueue s_vi_queue;
 static OSMesg s_vi_messages[4];
 static int s_queue_created;
 static int s_vi_registered;
 static int s_controller_initialized;
+#if defined(SF64_PS3_ARWING_PROBE)
+static int s_original_title_logic_initialized;
+#endif
+
+#if defined(SF64_PS3_TARGET)
+static int s_controller_owned;
+static Sf64ControllerSample s_controller_sample = { 0, 0, 128, 128 };
+static Sf64ControllerState s_controller_state;
+
+static void sf64_platform_reset_controller(void)
+{
+    s_controller_sample.digital1 = 0;
+    s_controller_sample.digital2 = 0;
+    s_controller_sample.left_x = 128;
+    s_controller_sample.left_y = 128;
+    sf64_controller_update(&s_controller_state, NULL);
+#if defined(SF64_PS3_ARWING_PROBE)
+    if (s_original_title_logic_initialized) {
+        sf64_original_title_logic_set_controller(0, 0, 0);
+    }
+#endif
+}
+#endif
 
 #if defined(SF64_PS3_ARWING_PROBE)
 extern const unsigned char sf64_arwing_segment_data[];
 extern const unsigned int sf64_arwing_segment_size;
 extern const unsigned char sf64_title_segment_data[];
 extern const unsigned int sf64_title_segment_size;
+#if !defined(SF64_PS3_BOOT_PROBE)
 static u8 s_arwing_rdram[SF64_ARWING_RDRAM_REQUIRED_SIZE];
 static u8 s_title_starfield_commands[SF64_TITLE_STARFIELD_RDRAM_SIZE];
 static u32 s_title_starfield_command_bytes;
 static u32 s_title_star_count;
+#endif
 static int s_arwing_task_logged;
-static int s_original_title_logic_initialized;
 #else
 
 static const u8 s_f3dex1_root_display_list[] = {
@@ -199,6 +232,51 @@ Sf64ApiState sf64_platform_receive_vi_message(void)
 
 Sf64ApiState sf64_platform_poll_controller(void)
 {
+#if defined(SF64_PS3_TARGET)
+    padInfo2 info;
+    padData data;
+
+    if (!s_controller_initialized) {
+        s32 result = ioPadInit(MAX_PORT_NUM);
+        if (result != PAD_OK && (u32)result != PAD_ERROR_ALREADY_INITIALIZED) {
+            sf64_platform_reset_controller();
+            return SF64_API_FAILED;
+        }
+        s_controller_owned = result == PAD_OK;
+        s_controller_initialized = 1;
+    }
+    memset(&info, 0, sizeof(info));
+    if (ioPadGetInfo2(&info) != PAD_OK) {
+        sf64_platform_reset_controller();
+        return SF64_API_FAILED;
+    }
+    if ((info.port_status[0] & 1U) == 0U) {
+        sf64_platform_reset_controller();
+    } else {
+        memset(&data, 0, sizeof(data));
+        if (ioPadGetData(0, &data) != PAD_OK) {
+            sf64_platform_reset_controller();
+            return SF64_API_FAILED;
+        }
+        if (data.len > PAD_BUTTON_OFFSET_ANALOG_LEFT_Y) {
+            s_controller_sample.digital1 = data.button[PAD_BUTTON_OFFSET_DIGITAL1];
+            s_controller_sample.digital2 = data.button[PAD_BUTTON_OFFSET_DIGITAL2];
+            s_controller_sample.left_x = (uint8_t)data.button[PAD_BUTTON_OFFSET_ANALOG_LEFT_X];
+            s_controller_sample.left_y = (uint8_t)data.button[PAD_BUTTON_OFFSET_ANALOG_LEFT_Y];
+        }
+        sf64_controller_update(&s_controller_state, &s_controller_sample);
+    }
+#if defined(SF64_PS3_ARWING_PROBE)
+    if (s_original_title_logic_initialized) {
+        if (s_controller_state.pressed & 0x9000U) {
+            printf("[sf64-ps3] option menu is not implemented yet\n");
+        }
+        sf64_original_title_logic_set_controller(
+            s_controller_state.pressed & (uint16_t)~0x9000U,
+            s_controller_state.stick_x, s_controller_state.stick_y);
+    }
+#endif
+#else
     N64ps3ControllerState pad;
 
     memset(&pad, 0, sizeof(pad));
@@ -215,6 +293,7 @@ Sf64ApiState sf64_platform_poll_controller(void)
                                                  pad.stick_x,
                                                  pad.stick_y);
     }
+#endif
 #endif
     return SF64_API_WORKED;
 }
@@ -241,7 +320,107 @@ Sf64ApiState sf64_platform_probe_pi_read(void)
 
 Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
 {
-#if defined(SF64_PS3_ARWING_PROBE)
+#if defined(SF64_PS3_BOOT_PROBE)
+    extern const unsigned char sf64_boot_logo_data[];
+    extern const unsigned int sf64_boot_logo_size;
+    extern const unsigned char sf64_great_fox_segment_data[];
+    extern const unsigned int sf64_great_fox_segment_size;
+    static uint8_t boot_memory[SF64_BOOT_RDRAM_BYTES];
+    static Sf64BootState boot;
+    static Sf64OpeningState opening;
+    static uint8_t opening_memory[SF64_OPENING_RDRAM_BYTES];
+    static uint8_t team_memory[SF64_ARWING_RDRAM_REQUIRED_SIZE];
+    static uint8_t opening_stars[SF64_TITLE_STARFIELD_DISPLAY_LIST_CAPACITY];
+    static unsigned opening_stars_size;
+    static unsigned opening_star_count;
+    static uint64_t next_opening_tick;
+    static int opening_initialized;
+    static int initialized;
+    static int logged_done;
+    N64ps3GfxTask task;
+    int visible;
+    uint64_t now = (uint64_t)sysGetSystemTime();
+
+    if (!initialized) {
+        sf64_boot_init(&boot);
+        initialized = 1;
+    }
+    visible = sf64_boot_update(&boot, now);
+    if (boot.save_check_pending) {
+        printf("[sf64-ps3] boot: save check not implemented\n");
+        boot.save_check_pending = 0;
+    }
+    if (boot.state == 1 && !logged_done) {
+        printf("[sf64-ps3] boot: reached GSTATE_INIT; starting opening logo sequence\n");
+        logged_done = 1;
+    }
+    if (boot.state == 1) {
+        if (!opening_initialized) {
+            sf64_opening_init(&opening);
+            next_opening_tick = now;
+            opening_initialized = 1;
+        }
+        while (now >= next_opening_tick && !opening.finished) {
+            sf64_opening_update(&opening);
+            if ((opening.phase == 0 || opening.phase == 2) && sf64_title_starfield_build_opening(opening_stars, sizeof(opening_stars),
+                                                    &opening_stars_size,
+                                                    &opening_star_count,
+                                                    opening.eye, opening.at, opening.star_speed) != 0) {
+                return SF64_API_FAILED;
+            }
+            next_opening_tick += 33333U;
+            if (now >= next_opening_tick && now - next_opening_tick > 133332U) {
+                next_opening_tick = now + 33333U;
+            }
+            if (opening.finished) {
+                printf("[sf64-ps3] opening: takeoff scene not implemented\n");
+            }
+        }
+        if (opening.phase == 1 && opening.scene_state != 0) {
+            float fade = 1.0f - (float)opening.fill_alpha / 255.0f;
+            if (sf64_team_running_build(&task, team_memory, sizeof(team_memory),
+                                        sf64_title_segment_data, sf64_title_segment_size,
+                                        opening.eye, opening.at, opening.up,
+                                        opening.team_z_offset, opening.passage_offset,
+                                        fade, opening.team_frames) != 0) {
+                printf("[sf64-ps3] opening: failed to build team-running task\n");
+                return SF64_API_FAILED;
+            }
+            n64ps3_gfx_begin_frame();
+            n64ps3_gfx_submit_task(&task);
+            n64ps3_gfx_end_frame();
+            return SF64_API_WORKED;
+        }
+        if (opening.phase != 0 && opening.phase != 2) {
+            if (sf64_boot_build_task(&task, boot_memory, sizeof(boot_memory),
+                                     sf64_boot_logo_data, sf64_boot_logo_size, 0) != 0) {
+                return SF64_API_FAILED;
+            }
+            n64ps3_gfx_begin_frame();
+            n64ps3_gfx_submit_task(&task);
+            n64ps3_gfx_end_frame();
+            return SF64_API_WORKED;
+        }
+        if (sf64_opening_build_task(&task, opening_memory, sizeof(opening_memory),
+                                    sf64_title_segment_data, sf64_title_segment_size,
+                                    opening_stars, opening_stars_size, &opening,
+                                    sf64_great_fox_segment_data, sf64_great_fox_segment_size) != 0) {
+            return SF64_API_FAILED;
+        }
+        n64ps3_gfx_begin_frame();
+        n64ps3_gfx_submit_task(&task);
+        n64ps3_gfx_end_frame();
+        return SF64_API_WORKED;
+    }
+    if (sf64_boot_build_task(&task, boot_memory, sizeof(boot_memory),
+                             sf64_boot_logo_data, sf64_boot_logo_size, visible) != 0) {
+        return SF64_API_FAILED;
+    }
+    n64ps3_gfx_begin_frame();
+    n64ps3_gfx_submit_task(&task);
+    n64ps3_gfx_end_frame();
+    return SF64_API_WORKED;
+#elif defined(SF64_PS3_ARWING_PROBE)
     N64ps3GfxTask task;
     Sf64ArwingBuildInfo info;
     Sf64TitleUiInfo title_ui_info;
@@ -450,5 +629,12 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
 
 void sf64_platform_shutdown(void)
 {
+#if defined(SF64_PS3_TARGET)
+    if (s_controller_owned) {
+        ioPadEnd();
+        s_controller_owned = 0;
+    }
+    s_controller_initialized = 0;
+#endif
     n64ps3_runtime_shutdown();
 }

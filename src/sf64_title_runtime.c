@@ -7,6 +7,8 @@ extern const u8 sf64_arwing_segment_data[];
 extern const unsigned int sf64_arwing_segment_size;
 extern const u8 sf64_title_segment_data[];
 extern const unsigned int sf64_title_segment_size;
+extern const u8 sf64_option_segment_data[];
+extern const unsigned int sf64_option_segment_size;
 
 extern void Title_Screen_Update(void);
 extern TitleArwingInfo sTitleArwing[4];
@@ -73,6 +75,9 @@ void *sf64_original_segmented_to_virtual(uintptr_t address)
     }
     if (segment == 3U && offset < sf64_arwing_segment_size) {
         return (void *)(sf64_arwing_segment_data + offset);
+    }
+    if (segment == 8U && offset < sf64_option_segment_size) {
+        return (void *)(sf64_option_segment_data + offset);
     }
     return (void *)address;
 }

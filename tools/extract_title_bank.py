@@ -20,14 +20,14 @@ def read_u32(data: bytes, offset: int) -> int:
     return struct.unpack_from(">I", data, offset)[0]
 
 
-def decode_mio0(data: bytes) -> bytes:
+def decode_mio0(data: bytes, expected_size: int = AST_TITLE_SIZE) -> bytes:
     if len(data) < 16 or data[:4] != b"MIO0":
-        raise ValueError("ast_title payload is not MIO0")
+        raise ValueError("payload is not MIO0")
 
     output_size, compressed_offset, raw_offset = struct.unpack_from(">III", data, 4)
-    if output_size != AST_TITLE_SIZE:
+    if output_size != expected_size:
         raise ValueError(
-            f"ast_title MIO0 size is 0x{output_size:x}; expected 0x{AST_TITLE_SIZE:x}"
+            f"MIO0 size is 0x{output_size:x}; expected 0x{expected_size:x}"
         )
     if not (16 <= compressed_offset <= len(data)) or not (
         16 <= raw_offset <= len(data)

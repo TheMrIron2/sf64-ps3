@@ -25,14 +25,24 @@ typedef struct Sf64ArwingTitlePose {
     float rotation_degrees[3];
 } Sf64ArwingTitlePose;
 
+void sf64_great_fox_matrices(const float eye[3], const float at[3], const float up[3],
+                             const float position[3], float light_x, float light_y, float projection[16],
+                             float modelview[16], float direction[3]);
+
 typedef struct Sf64TitleTeamModel {
     uint32_t skeleton_address;
     uint32_t limb_count;
     float position[3];
     float rotation_degrees[3];
     float scale;
+    int use_root_translation;
+    float root_translation[3];
     float joint_rotation_degrees[SF64_TITLE_TEAM_MAX_LIMBS][3];
 } Sf64TitleTeamModel;
+
+int sf64_title_running_animation(const uint8_t *segment, uint32_t segment_size,
+                                 uint32_t team, uint32_t frame,
+                                 Sf64TitleTeamModel *model, float root_translation[3]);
 
 /* Use state produced by the original Title_Screen_Setup/Update routines. */
 void sf64_arwing_set_title_pose(const Sf64ArwingTitlePose *pose);
@@ -66,5 +76,11 @@ int sf64_arwing_append_title_teams(N64ps3GfxTask *task,
                                    const Sf64OriginalTitleLighting *lighting,
                                    uint32_t *limb_count,
                                    uint32_t *display_list_count);
+
+int sf64_team_running_build(N64ps3GfxTask *task, uint8_t *rdram, uint32_t rdram_size,
+                            const uint8_t *title, uint32_t title_size,
+                            const float eye[3], const float at[3], const float up[3],
+                            float team_z_offset, float passage_offset, float fade,
+                            const int frames[4]);
 
 #endif

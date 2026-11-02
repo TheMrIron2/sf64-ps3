@@ -17,5 +17,10 @@ int sf64_title_starfield_build_current(unsigned char *output,
                                        unsigned int output_capacity,
                                        unsigned int *output_size,
                                        unsigned int *star_count);
+int sf64_title_starfield_build_opening(unsigned char *output,
+                                       unsigned int output_capacity,
+                                       unsigned int *output_size,
+                                       unsigned int *star_count,
+                                       const float eye[3], const float at[3], float speed);
 
 #endif

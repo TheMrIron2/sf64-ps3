@@ -11,6 +11,10 @@
 extern void sf64_original_title_starfield_init(void);
 extern void sf64_original_title_starfield_update(void);
 extern void sf64_original_title_starfield_draw(void);
+extern void sf64_original_opening_starfield_update(const float eye[3], const float at[3], float speed);
+static const float *s_opening_eye;
+static const float *s_opening_at;
+static float s_opening_speed;
 
 Gfx *gMasterDisp;
 
@@ -113,7 +117,9 @@ static int sf64_title_starfield_build_internal(unsigned char *output,
     if (sf64_title_starfield_init() != 0) {
         return -1;
     }
-    if (update_state) {
+    if (update_state == 2) {
+        sf64_original_opening_starfield_update(s_opening_eye, s_opening_at, s_opening_speed);
+    } else if (update_state) {
         sf64_original_title_starfield_update();
     } else {
         sf64_original_title_starfield_draw();
@@ -146,4 +152,18 @@ int sf64_title_starfield_build_current(unsigned char *output,
 {
     return sf64_title_starfield_build_internal(output, output_capacity,
                                                output_size, star_count, 0);
+}
+
+int sf64_title_starfield_build_opening(unsigned char *output,
+                                       unsigned int output_capacity,
+                                       unsigned int *output_size,
+                                       unsigned int *star_count,
+                                       const float eye[3], const float at[3], float speed)
+{
+    if (!eye || !at) return -1;
+    s_opening_eye = eye;
+    s_opening_at = at;
+    s_opening_speed = speed;
+    return sf64_title_starfield_build_internal(output, output_capacity,
+                                               output_size, star_count, 2);
 }
