@@ -237,6 +237,177 @@ static uint32_t get32(const uint8_t *p)
            ((uint32_t)p[2] << 8) | p[3];
 }
 
+
+/* Great Fox engine lights from Cutscene_DrawGreatFox; the opening shot had none. */
+
+static void opening_append_sun_fill(uint8_t *rdram, unsigned *count,
+                                    unsigned alpha)
+{
+    uint8_t *v = rdram + 0x16c00U;
+    float sx, sy;
+    int x0, x1, y0, y1;
+    unsigned i;
+
+    /* Extend past the 4:3 content so the brightness covers the whole display. */
+    sf64_display_fit_4_3(sf64_display_aspect(), &sx, &sy);
+    x0 = -(int)(160.0f * (1.0f / sx - 1.0f) + 0.5f);
+    x1 = 320 - x0;
+    y0 = -(int)(120.0f * (1.0f / sy - 1.0f) + 0.5f);
+    y1 = 240 - y0;
+
+    command(rdram, count, 0x01060040U, 0x80008000U);
+    command(rdram, count, 0x01020040U, 0x80008040U);
+    command(rdram, count, 0xb6000000U, 0x00023001U);
+    command(rdram, count, 0xd7000000U, 0xffffffffU);
+    command(rdram, count, 0xb900031dU, 0x00504240U);
+    vertex(v, x0, y0, 0, 0);
+    vertex(v + 16U, x1, y0, 0, 0);
+    vertex(v + 32U, x1, y1, 0, 0);
+    vertex(v + 48U, x0, y1, 0, 0);
+    for (i = 0; i < 4U; i++) {
+        v[i * 16U + 12U] = 208U;
+        v[i * 16U + 13U] = 208U;
+        v[i * 16U + 14U] = 208U;
+        v[i * 16U + 15U] = (uint8_t)alpha;
+    }
+    command(rdram, count, 0x0400103fU, 0x80000000U | 0x16c00U);
+    command(rdram, count, 0xbf000000U, 0x00000204U);
+    command(rdram, count, 0xbf000000U, 0x00000406U);
+}
+
+static void opening_append_engine_lights(uint8_t *rdram, unsigned *count,
+                                         const uint8_t *title,
+                                         const float modelview[16], int frame)
+{
+    static const float positions3[4][3] = {
+        { -1373.0f, 484.0f, -374.0f }, { 1373.0f, 484.0f, -374.0f },
+        { -1373.0f, -704.0f, -374.0f }, { 1373.0f, -704.0f, -374.0f }
+    };
+    static const float positions1[3][3] = {
+        { 0.0f, 40.0f, -2278.0f }, { 295.0f, -92.0f, -1301.0f },
+        { -295.0f, -92.0f, -1301.0f }
+    };
+    static const float blink_scale[8] = {
+        0.15f, 0.45f, 0.75f, 1.3f, 0.75f, 0.45f, 0.15f, 0.0f
+    };
+    static const float orb_pos2[8] = {
+        -30.0f, -60.0f, -90.0f, -120.0f, -150.0f, -180.0f, -200.0f, -210.0f
+    };
+    static const float orb_scale3[8] = {
+        1.5f, 0.87f, 0.83f, 0.75f, 0.7f, 0.6f, 0.4f, 0.1f
+    };
+    uint8_t *texture = rdram + 0x14000U;
+    uint8_t *verts = rdram + 0x15000U;
+    float m[4][4];
+    unsigned i;
+    unsigned j;
+    unsigned pixel;
+
+    for (pixel = 0; pixel < 32U * 32U; pixel++) {
+        uint8_t ia8 = title[0x32178U + pixel];
+        texture[pixel * 4U] = texture[pixel * 4U + 1U] = texture[pixel * 4U + 2U] = 255U;
+        texture[pixel * 4U + 3U] = (uint8_t)((ia8 & 0x0fU) * 17U);
+    }
+    command(rdram, count, 0xb6000000U, 0x00023000U);
+    command(rdram, count, 0xe3000c02U, 0x00002000U);
+    command(rdram, count, 0xb900031dU, 0x00504240U);
+    command(rdram, count, 0xbc001c06U, 0x80000000U | 0x14000U);
+    command(rdram, count, 0xe7000000U, 0U);
+    command(rdram, count, 0xfd180000U | 31U, 0x07000000U);
+    command(rdram, count, 0xf5180000U, 0x07000000U | (2U << 8) | (2U << 18));
+    command(rdram, count, 0xe6000000U, 0U);
+    command(rdram, count, 0xf3000000U,
+            0x07000000U | ((32U * 32U - 1U) << 12));
+    command(rdram, count, 0xe7000000U, 0U);
+    command(rdram, count, 0xf5182000U, (2U << 8) | (2U << 18));
+    command(rdram, count, 0xf2000000U, (124U << 12) | 124U);
+
+#define OPENING_ORB(slot, pos, scale, r, g, b, a)                                   \
+    do {                                                                           \
+        uint8_t *v = verts + (slot) * 64U;                                         \
+        unsigned vi;                                                               \
+        memcpy(m, modelview, sizeof(m));                                           \
+        opening_matrix_translate(m, (pos)[0], (pos)[1], (pos)[2]);                  \
+        opening_matrix_scale(m, (scale), (scale), 1.0f);                            \
+        matrix(rdram + 0x15500U + (slot) * 64U, (const float *)m);                  \
+        command(rdram, count, 0x01020040U, 0x80000000U | (0x15500U + (slot) * 64U));\
+        vertex(v, -40, 40, 0, 0);                                                  \
+        vertex(v + 16U, -40, -40, 0, 1024);                                        \
+        vertex(v + 32U, 40, -40, 1024, 1024);                                      \
+        vertex(v + 48U, 40, 40, 1024, 0);                                          \
+        for (vi = 0; vi < 4U; vi++) {                                              \
+            v[vi * 16U + 12U] = (uint8_t)(r);                                      \
+            v[vi * 16U + 13U] = (uint8_t)(g);                                      \
+            v[vi * 16U + 14U] = (uint8_t)(b);                                      \
+            v[vi * 16U + 15U] = (uint8_t)(a);                                      \
+        }                                                                          \
+        command(rdram, count, 0x0400103fU, 0x80000000U | (0x15000U + (slot) * 64U));\
+        command(rdram, count, 0xbf000000U, 0x00000204U);                           \
+        command(rdram, count, 0xbf000000U, 0x00000406U);                           \
+    } while (0)
+
+    for (i = 0; i < 4U; i++) {
+        float scale = 0.0f;
+        unsigned red = i < 2U ? 255U : 32U;
+        unsigned blue = i < 2U ? 32U : 255U;
+
+        if (i < 2U) {
+            if ((frame & 0x38U) == 0U) {
+                scale = blink_scale[frame & 7U];
+            }
+        } else if (((frame + 32U) & 0x38U) == 0U) {
+            scale = blink_scale[frame & 7U];
+        }
+        if (scale <= 0.0f) {
+            continue;
+        }
+        OPENING_ORB(i, positions3[i], scale, red, 32U, blue, 255U);
+    }
+    for (i = 0; i < 3U; i++) {
+        float scale = (frame & 1) ? 5.2f : 5.0f;
+        float sub[3];
+
+        OPENING_ORB(4U + i, positions1[i], scale, 255U, 255U, 0U, 48U);
+        for (j = 0; j < 4U; j++) {
+            sub[0] = 0.0f;
+            sub[1] = 0.0f;
+            sub[2] = orb_pos2[j * 2U];
+            memcpy(m, modelview, sizeof(m));
+            opening_matrix_translate(m, positions1[i][0], positions1[i][1],
+                                     positions1[i][2]);
+            opening_matrix_scale(m, scale, scale, 1.0f);
+            {
+                float sub_scale = orb_scale3[j * 2U];
+                opening_matrix_translate(m, sub[0], sub[1], sub[2]);
+                opening_matrix_scale(m, sub_scale, sub_scale, 1.0f);
+                matrix(rdram + 0x15500U + (7U + i * 4U + j) * 64U,
+                       (const float *)m);
+            }
+            command(rdram, count, 0x01020040U,
+                    0x80000000U | (0x15500U + (7U + i * 4U + j) * 64U));
+            {
+                uint8_t *v = verts + (7U + i * 4U + j) * 64U;
+                unsigned vi;
+                vertex(v, -40, 40, 0, 0);
+                vertex(v + 16U, -40, -40, 0, 1024);
+                vertex(v + 32U, 40, -40, 1024, 1024);
+                vertex(v + 48U, 40, 40, 1024, 0);
+                for (vi = 0; vi < 4U; vi++) {
+                    v[vi * 16U + 12U] = 255U;
+                    v[vi * 16U + 13U] = 255U;
+                    v[vi * 16U + 14U] = 0U;
+                    v[vi * 16U + 15U] = 48U;
+                }
+            }
+            command(rdram, count, 0x0400103fU,
+                    0x80000000U | (0x15000U + (7U + i * 4U + j) * 64U));
+            command(rdram, count, 0xbf000000U, 0x00000204U);
+            command(rdram, count, 0xbf000000U, 0x00000406U);
+        }
+    }
+#undef OPENING_ORB
+}
+
 static void opening_texture(uint8_t *dest, const uint8_t *indices,
                             const uint8_t *palette, unsigned pixels)
 {
@@ -308,9 +479,22 @@ int sf64_opening_build_task(N64ps3GfxTask *task, uint8_t *rdram, uint32_t size,
         command(rdram, &count, 0xd7000001U, 0xffffffffU);
         command(rdram, &count, 0xb7000000U, 0x00020001U);
         command(rdram, &count, 0x06000000U, 0x0e000000U);
+        opening_append_engine_lights(rdram, &count, title, modelview,
+                                     state->message_frame);
+
+    }
+    /* Title_Sun_Draw raises gFillScreenAlpha to 60 while the sun is in view */
+    if (state->show_sun != 0 && state->n64_slide < 950.0f &&
+        state->n64_slide > -900.0f) {
+        state->sun_fill_alpha += 8;
+        if (state->sun_fill_alpha > 60) {
+            state->sun_fill_alpha = 60;
+        }
+    } else if (state->sun_fill_alpha > 0) {
+        state->sun_fill_alpha -= 4;
     }
     if (state->show_sun != 0 && state->n64_slide > -870.0f &&
-        state->n64_slide < 900.0f && state->fill_alpha > 0) {
+        state->n64_slide < 900.0f && state->sun_fill_alpha > 0) {
         float sun_projection[16];
         float sun_view[16];
         uint8_t *glare1 = rdram + 0x12000U;
@@ -328,17 +512,17 @@ int sf64_opening_build_task(N64ps3GfxTask *task, uint8_t *rdram, uint32_t size,
             uint16_t value2 = (uint16_t)((title[0x36bc8U + i * 2U] << 8) |
                                          title[0x36bc8U + i * 2U + 1U]);
 
-            glare1[i * 4U] = glare1[i * 4U + 1U] = glare1[i * 4U + 2U] =
-                (uint8_t)(value1 >> 8);
-            glare1[i * 4U + 3U] = (uint8_t)(value1 & 0xffU);
-            glare2[i * 4U] = glare2[i * 4U + 1U] = glare2[i * 4U + 2U] =
-                (uint8_t)(value2 >> 8);
-            glare2[i * 4U + 3U] = (uint8_t)(value2 & 0xffU);
+            /* IA16 glare: fold intensity into alpha so zero-intensity texels
+             * are transparent instead of opaque black. */
+            glare1[i * 4U] = glare1[i * 4U + 1U] = glare1[i * 4U + 2U] = 255U;
+            glare1[i * 4U + 3U] = (uint8_t)(((value1 >> 8) * (value1 & 0xffU)) / 255U);
+            glare2[i * 4U] = glare2[i * 4U + 1U] = glare2[i * 4U + 2U] = 255U;
+            glare2[i * 4U + 3U] = (uint8_t)(((value2 >> 8) * (value2 & 0xffU)) / 255U);
         }
         command(rdram, &count, 0x01060040U, 0x80008800U);
         command(rdram, &count, 0x01020040U, 0x80008840U);
 
-        fade = state->fill_alpha < 10 ? (float)state->fill_alpha / 10.0f : 1.0f;
+        fade = state->sun_fill_alpha < 10 ? (float)state->sun_fill_alpha / 10.0f : 1.0f;
         fade *= 0.5f;
         for (i = 0; i < 12U; i++) {
             float m[4][4];
@@ -374,7 +558,7 @@ int sf64_opening_build_task(N64ps3GfxTask *task, uint8_t *rdram, uint32_t size,
     matrix(rdram + 0x8000, ortho);
     matrix(rdram + 0x8040, identity);
     if (state->show_sun != 0 && state->n64_slide > -870.0f &&
-        state->n64_slide < 900.0f && state->fill_alpha > 0) {
+        state->n64_slide < 900.0f && state->sun_fill_alpha > 0) {
         uint8_t *texture = rdram + 0x11000U;
         uint8_t *sun_vertices = rdram + 0x8280U;
         unsigned alpha;
@@ -397,7 +581,7 @@ int sf64_opening_build_task(N64ps3GfxTask *task, uint8_t *rdram, uint32_t size,
             texture[j * 4U] = (uint8_t)((r << 3) | (r >> 2));
             texture[j * 4U + 1U] = (uint8_t)((g << 3) | (g >> 2));
             texture[j * 4U + 2U] = (uint8_t)((b << 3) | (b >> 2));
-            texture[j * 4U + 3U] = 255U;
+            texture[j * 4U + 3U] = (uint8_t)(((r * 11U) + (g * 16U) + (b * 5U)) / 32U * 8U);
         }
         command(rdram, &count, 0x01060040U, 0x80008000U);
         command(rdram, &count, 0x01020040U, 0x80008040U);
@@ -529,6 +713,9 @@ int sf64_opening_build_task(N64ps3GfxTask *task, uint8_t *rdram, uint32_t size,
         command(rdram, &count, 0x0400103fU, 0x80008280U);
         command(rdram, &count, 0xbf000000U, 0x00000204U);
         command(rdram, &count, 0xbf000000U, 0x00000406U);
+    }
+    if (state->sun_fill_alpha > 0) {
+        opening_append_sun_fill(rdram, &count, (unsigned)state->sun_fill_alpha);
     }
     command(rdram, &count, 0xb8000000U, 0);
     memset(task, 0, sizeof(*task));

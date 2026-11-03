@@ -103,7 +103,12 @@ typedef struct { Vec3f eye, at; } CameraPoint;
 #define D_menu_801B84D0 state->team_z_offset
 #define sPassageWayZoffset state->passage_offset
 #define sDrawTeamName state->team_name_visible
-#define Title_SetLightRot(...) ((void)0)
+#define D_menu_801B8338 state->team_ambient_toggle
+#define D_menu_801B8334 state->team_ambient_index
+#define D_menu_801B82E0 state->team_light_dir[0]
+#define D_menu_801B82E4 state->team_light_dir[1]
+#define D_menu_801B82E8 state->team_light_dir[2]
+#define Title_SetLightRot(xr, yr, zs, dx, dy, dz) opening_set_light_rot(state, (xr), (yr), (zs), (dx), (dy), (dz))
 #define Audio_KillSfxById(...) ((void)0)
 #define gDrawMode state->draw_mode
 #define DRAW_NONE 0
@@ -155,6 +160,7 @@ void sf64_opening_update(Sf64OpeningState *state) {
         state->team_frames[1] += 5;
         state->team_frames[2] += 6;
         state->team_frames[3] += 7;
+        opening_team_lighting(state);
         return;
     }
     if (state->phase == 2) {
@@ -216,6 +222,79 @@ static void opening_set_cam_up(Sf64OpeningState *state, f32 xrot, f32 yrot) {
     state->up[1] = cosf(x);
     state->up[2] = cosf(y) * sinf(x);
 }
+/* Title_SetLightRot: camera-pre-rotated light direction (view space). */
+static void opening_set_light_rot(Sf64OpeningState *state, f32 xRot, f32 yRot,
+                                  f32 zSrc, f32 *dirX, f32 *dirY, f32 *dirZ) {
+    f32 x = gCsCamEyeX - gCsCamAtX;
+    f32 y = gCsCamEyeY - gCsCamAtY;
+    f32 z = gCsCamEyeZ - gCsCamAtZ;
+    f32 xRotTarget = -atan2f(y, sqrtf(x * x + z * z)) * 57.2957795131f;
+    f32 yRotTarget = atan2f(x, z) * 57.2957795131f;
+    f32 dx = 0.0f, dy = 0.0f, dz = zSrc;
+    f32 angle, cosine, sine, old;
+
+    angle = -xRotTarget * 0.01745329252f;
+    cosine = cosf(angle);
+    sine = sinf(angle);
+    old = dy;
+    dy = old * cosine - dz * sine;
+    dz = old * sine + dz * cosine;
+    angle = -yRotTarget * 0.01745329252f;
+    cosine = cosf(angle);
+    sine = sinf(angle);
+    old = dx;
+    dx = old * cosine + dz * sine;
+    dz = -old * sine + dz * cosine;
+    angle = yRot * 0.01745329252f;
+    cosine = cosf(angle);
+    sine = sinf(angle);
+    old = dx;
+    dx = old * cosine + dz * sine;
+    dz = -old * sine + dz * cosine;
+    angle = xRot * 0.01745329252f;
+    cosine = cosf(angle);
+    sine = sinf(angle);
+    old = dy;
+    dy = old * cosine - dz * sine;
+    dz = old * sine + dz * cosine;
+
+    if (dirX) *dirX = dx;
+    if (dirY) *dirY = dy;
+    if (dirZ) *dirZ = dz;
+}
+/* Title_CsTeamRunning_Draw lighting: passage ambient cycles every 8 frames and
+ * the team light sweeps +-90 degrees in 30 degree steps on odd frames. */
+static void opening_team_lighting(Sf64OpeningState *state) {
+    static const f32 ambient[4][3] = {
+        { 255.0f, 155.0f, 155.0f },
+        { 155.0f, 255.0f, 155.0f },
+        { 135.0f, 206.0f, 255.0f },
+        { 255.0f, 255.0f, 155.0f },
+    };
+
+    if ((state->team_counter % 8) == 7) {
+        if (state->team_ambient_toggle) {
+            state->team_ambient_index = (state->team_ambient_index + 1) % 4;
+            state->team_ambient[0] = ambient[state->team_ambient_index][0];
+            state->team_ambient[1] = ambient[state->team_ambient_index][1];
+            state->team_ambient[2] = ambient[state->team_ambient_index][2];
+        } else {
+            state->team_ambient[0] = 155.0f;
+            state->team_ambient[1] = 155.0f;
+            state->team_ambient[2] = 155.0f;
+        }
+        state->team_ambient_toggle ^= 1;
+    }
+    if ((state->team_counter % 2) != 0) {
+        state->light_y += 30.0f;
+        if (state->light_y > 90.0f) {
+            state->light_y = -90.0f;
+        }
+    }
+    opening_set_light_rot(state, state->light_x, state->light_y, 100.0f,
+                          &state->team_light_dir[0], &state->team_light_dir[1],
+                          &state->team_light_dir[2]);
+}
 static void opening_team_setup(Sf64OpeningState *state) {
     f32 pitch = 3.0f * 0.01745329252f, yaw = 7.0f * 0.01745329252f;
     f32 dx = sinf(yaw) * cosf(pitch), dy = -sinf(pitch), dz = cosf(yaw) * cosf(pitch);
@@ -235,6 +314,14 @@ static void opening_team_setup(Sf64OpeningState *state) {
     state->team_frames[1] = 0;
     state->team_frames[2] = 29;
     state->team_frames[3] = 41;
+    state->light_x = 0.0f;
+    state->light_y = -90.0f;
+    state->team_ambient_index = 0;
+    state->team_ambient_toggle = 1;
+    state->team_ambient[0] = state->team_ambient[1] = state->team_ambient[2] = 77.0f;
+    opening_set_light_rot(state, state->light_x, state->light_y, 100.0f,
+                          &state->team_light_dir[0], &state->team_light_dir[1],
+                          &state->team_light_dir[2]);
 }
 '''
     args.output.write_text(header + camera_data + team_data + smooth + camera_calc + camera_step + fade + helpers + team_update + wrapper + cases +

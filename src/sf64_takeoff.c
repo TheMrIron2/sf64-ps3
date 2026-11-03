@@ -328,6 +328,9 @@ static void takeoff_setup(Sf64TakeoffState *state)
         state->arwing[i].rotation_degrees[2] = 0.0f;
         state->arwing[i].cockpit_glass_xrot = -60.0f;
         state->arwing[i].laser_guns_ypos = -10.0f;
+        state->arwing[i].team_face_xrot = 0.0f;
+        state->arwing[i].team_face_yrot = 0.0f;
+        state->arwing[i].draw_face = 4 - i;
         state->arwing[i].vel = 0.05f;
         state->arwing[i].draw = 1;
         state->arwing[i].draw_shadow = 1;
@@ -724,6 +727,78 @@ static void space_camera_set(Sf64SpaceState *state, int count)
     }
 }
 
+static float space_rand_float(Sf64SpaceState *state)
+{
+    state->rand_seed = state->rand_seed * 1664525U + 1013904223U;
+    return (float)(state->rand_seed >> 8) / 16777216.0f;
+}
+
+static void space_setup_explosions(Sf64SpaceState *state)
+{
+    int i;
+
+    state->rand_seed = 0x5f3759dfU;
+    for (i = 0; i < 10; i++) {
+        state->explosion_y[i] = 10.0f + space_rand_float(state) * 10.0f;
+        state->explosion_rot[i] = -10.0f - space_rand_float(state) * 60.0f;
+        state->explosion_scale[i] = 0.0f;
+        state->explosion_target[i] = 0.1f + space_rand_float(state) * 0.3f;
+        state->explosion_timer[i] = 5 + (int)(space_rand_float(state) * 5.0f);
+        state->explosion_alpha[i] = 255;
+        state->explosion_env[i] = 128;
+        state->explosion_state[i] = 0;
+    }
+}
+
+static void space_update_explosions(Sf64SpaceState *state)
+{
+    int i;
+
+    for (i = 0; i < 10; i++) {
+        switch (state->explosion_state[i]) {
+            case 0:
+                state->explosion_scale[i] += 0.15f;
+                if (state->explosion_scale[i] >= state->explosion_target[i]) {
+                    state->explosion_scale[i] = state->explosion_target[i];
+                    state->explosion_state[i] = 10;
+                }
+                break;
+            case 10:
+                state->explosion_timer[i]--;
+                if (state->explosion_timer[i] <= 0) {
+                    state->explosion_state[i] = 1;
+                }
+                break;
+            case 1:
+                state->explosion_alpha[i] -= 16;
+                if (state->explosion_alpha[i] < 0) {
+                    state->explosion_alpha[i] = 0;
+                }
+                state->explosion_env[i] -= 16;
+                if (state->explosion_env[i] < 0) {
+                    state->explosion_env[i] = 0;
+                }
+                if (state->explosion_alpha[i] == 0 &&
+                    state->explosion_env[i] == 0) {
+                    state->explosion_state[i] = 255;
+                }
+                break;
+            case 255:
+                state->explosion_y[i] = 10.0f + space_rand_float(state) * 10.0f;
+                state->explosion_rot[i] = -10.0f - space_rand_float(state) * 60.0f;
+                state->explosion_scale[i] = 0.0f;
+                state->explosion_target[i] = 0.1f + space_rand_float(state) * 0.3f;
+                state->explosion_timer[i] = 5 + (int)(space_rand_float(state) * 5.0f);
+                state->explosion_alpha[i] = 255;
+                state->explosion_env[i] = 128;
+                state->explosion_state[i] = 0;
+                break;
+            default:
+                break;
+        }
+    }
+}
+
 static void space_setup(Sf64SpaceState *state)
 {
     int i;
@@ -762,6 +837,9 @@ static void space_setup(Sf64SpaceState *state)
         state->arwing[i].rotation_degrees[2] = 0.0f;
         state->arwing[i].cockpit_glass_xrot = 0.0f;
         state->arwing[i].laser_guns_ypos = 0.0f;
+        state->arwing[i].team_face_xrot = 0.0f;
+        state->arwing[i].team_face_yrot = 0.0f;
+        state->arwing[i].draw_face = i + 1;
         state->arwing[i].vel = 0.05f;
         state->arwing[i].timer = 0;
         state->arwing[i].draw = 0;
@@ -770,6 +848,7 @@ static void space_setup(Sf64SpaceState *state)
 
     state->cam_weight = 0.0f;
     state->cam_segment = 0;
+    space_setup_explosions(state);
     space_set_cam_up2(state, -8.0f, -37.0f, 64.0f, 235.0f, 50.0f, 5.9f,
                       -112.74477f);
 }
@@ -857,6 +936,15 @@ void sf64_space_update(Sf64SpaceState *state)
                 }
             }
 
+            /* Title_Arwing_Draw always draws the engine glow in the space
+             * scene (unk_3C = 1, unk_44 = 1.2) and pulses it on odd frames. */
+            for (i = 0; i < 4; i++) {
+                state->arwing[i].engine_glow = 1;
+                state->arwing[i].engine_particle = 0;
+                state->arwing[i].engine_glow_scale =
+                    1.2f + ((state->timer3 & 1) ? 0.2f : 0.0f);
+            }
+
             if (state->timer3 == 125) {
                 state->fill_mode = 1;
             }
@@ -877,6 +965,8 @@ void sf64_space_update(Sf64SpaceState *state)
         default:
             break;
     }
+
+    space_update_explosions(state);
 
     {
         float x_rot;

@@ -50,7 +50,7 @@ include make/sf64_assets.mk
 
 -include $(HOST_DEPENDENCIES)
 
-.PHONY: all boot-probe arwing-probe option-probe controller-probe check-n64ps3 check-original-title-source
+.PHONY: all boot-probe arwing-probe option-probe controller-probe frame-raster check-n64ps3 check-original-title-source
 
 all: check-n64ps3 $(HOST_TARGET)
 
@@ -68,6 +68,10 @@ $(HOST_BUILD_DIR)/ast_great_fox.c: $(SF64_ASSET_ROM) tools/extract_great_fox_ban
 	@mkdir -p $(dir $@)
 	$(PYTHON) -B tools/extract_great_fox_bank.py $< $@
 
+$(HOST_BUILD_DIR)/ast_arwing.c: $(SF64_ASSET_ROM) tools/extract_arwing_bank.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) -B tools/extract_arwing_bank.py $< $@
+
 $(HOST_BUILD_DIR)/original_opening.c: $(SF64_SOURCE_DIR)/src/overlays/ovl_menu/fox_title.c $(SF64_SOURCE_DIR)/src/overlays/ovl_menu/fox_map.c $(SF64_SOURCE_DIR)/src/engine/fox_std_lib.c tools/extract_opening_logic.py tools/extract_title_starfield_source.py
 	@mkdir -p $(dir $@)
 	$(PYTHON) -B tools/extract_opening_logic.py --source $(SF64_SOURCE_DIR) --output $@
@@ -76,6 +80,13 @@ $(HOST_BUILD_DIR)/sf64_boot_probe: tools/boot_probe.c src/sf64_boot.c src/sf64_d
 	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_CFLAGS) -o $@ $^ $(N64PS3_LDLIBS)
 
 arwing-probe: check-n64ps3 $(HOST_ARWING_PROBE_TARGET)
+
+frame-raster: check-n64ps3 $(HOST_BUILD_DIR)/sf64_frame_raster
+	@printf '%s\n' "usage: $(HOST_BUILD_DIR)/sf64_frame_raster <space|takeoff|team> <frame> [out.png]"
+
+$(HOST_BUILD_DIR)/sf64_frame_raster: tools/frame_raster.c src/sf64_boot.c src/sf64_display.c src/sf64_arwing.c src/sf64_takeoff.c $(HOST_BUILD_DIR)/ast_arwing.c $(HOST_BUILD_DIR)/ast_title.c $(HOST_BUILD_DIR)/ast_great_fox.c $(HOST_BUILD_DIR)/original_opening.c $(HOST_TITLE_STARFIELD_OBJECT) $(HOST_ORIGINAL_STARFIELD_OBJECT) $(HOST_BUILD_DIR)/n64ps3/src/gfx/gfx_f3dex1.o
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(HOST_CPPFLAGS) $(HOST_CFLAGS) -o $@ $^ $(N64PS3_LDLIBS)
 
 controller-probe: $(HOST_BUILD_DIR)/sf64_controller_probe
 	$<

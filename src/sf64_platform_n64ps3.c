@@ -614,7 +614,8 @@ Sf64ApiState sf64_platform_submit_f3dex1_gfx_task(void)
                                         sf64_title_segment_data, sf64_title_segment_size,
                                         opening.eye, opening.at, opening.up,
                                         opening.team_z_offset, opening.passage_offset,
-                                        fade, opening.team_frames,
+                                        fade, opening.team_light_dir,
+                                        opening.team_ambient, opening.team_frames,
                                         opening.team_name_visible,
                                         opening.team_name_index) != 0) {
                 printf("[sf64-ps3] opening: failed to build team-running task\n");

@@ -1,6 +1,6 @@
 include make/common.mk
 
-.PHONY: host boot-probe arwing-probe option-probe controller-probe title-tools ps3 ps3-self ps3-fake-self ps3-boot-self ps3-arwing-self ps3-arwing-nodepth-self ps3-arwing-static-self clean
+.PHONY: host boot-probe arwing-probe option-probe controller-probe frame-raster title-tools ps3 ps3-self ps3-fake-self ps3-boot-self ps3-arwing-self ps3-arwing-nodepth-self ps3-arwing-static-self clean
 
 title-tools:
 	@test -f game/tools/Torch/CMakeLists.txt || { \
@@ -23,6 +23,9 @@ controller-probe:
 
 option-probe:
 	$(MAKE) -f make/host.mk option-probe
+
+frame-raster:
+	$(MAKE) -f make/host.mk frame-raster
 
 ps3:
 	$(MAKE) -f make/ps3.mk

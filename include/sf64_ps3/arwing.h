@@ -6,7 +6,7 @@
 
 #define SF64_ARWING_SEGMENT_ID 3U
 #define SF64_ARWING_SEGMENT_SIZE 0x00019df0U
-#define SF64_ARWING_RDRAM_REQUIRED_SIZE 0x00090000U
+#define SF64_ARWING_RDRAM_REQUIRED_SIZE 0x00092000U
 #define SF64_TITLE_STARFIELD_RDRAM_OFFSET 0x0002a000U
 #define SF64_TITLE_STARFIELD_RDRAM_SIZE 0x00006000U
 #define SF64_TITLE_TEAM_MAX_LIMBS 32U
@@ -84,6 +84,7 @@ int sf64_team_running_build(N64ps3GfxTask *task, uint8_t *rdram, uint32_t rdram_
                             const uint8_t *title, uint32_t title_size,
                             const float eye[3], const float at[3], const float up[3],
                             float team_z_offset, float passage_offset, float fade,
+                            const float light_dir[3], const float ambient[3],
                             const int frames[4], int team_name_visible,
                             int team_name_index);
 

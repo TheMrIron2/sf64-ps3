@@ -12,6 +12,9 @@ typedef struct Sf64TakeoffArwing {
     float rotation_degrees[3];
     float cockpit_glass_xrot;
     float laser_guns_ypos;
+    float team_face_xrot;
+    float team_face_yrot;
+    int draw_face;
     float vel;
     int timer;
     int draw;
@@ -103,6 +106,15 @@ typedef struct Sf64SpaceState {
     float cam_weight;
     int cam_segment;
     float cam_speed;
+    uint32_t rand_seed;
+    int explosion_state[10];
+    int explosion_timer[10];
+    int explosion_alpha[10];
+    int explosion_env[10];
+    float explosion_y[10];
+    float explosion_rot[10];
+    float explosion_scale[10];
+    float explosion_target[10];
     Sf64TakeoffArwing arwing[4];
     int finished;
 } Sf64SpaceState;

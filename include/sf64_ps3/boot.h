@@ -32,6 +32,9 @@ typedef struct Sf64OpeningState {
     int phase;
     int team_counter, team_name_index, team_name_visible;
     int team_frames[4];
+    int team_ambient_index, team_ambient_toggle;
+    float team_ambient[3];
+    float team_light_dir[3];
     int draw_mode;
     int fill_red, fill_green, fill_blue;
     struct { int draw; } corneria;
@@ -44,6 +47,7 @@ typedef struct Sf64OpeningState {
     float light_x, light_y, light_scale, light_scale2, logo_fade_out;
     int sun_glare_alpha;
     float sun_screen_x, sun_screen_y, sun_scale_x, sun_scale_y;
+    int sun_fill_alpha;
     float camera_xrot, camera_yrot, camera_weight, camera_speed;
     float star_speed;
     float camera_distance;

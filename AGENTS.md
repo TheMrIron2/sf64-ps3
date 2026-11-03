@@ -3,7 +3,7 @@
 This repository is an experimental Star Fox 64 to PlayStation 3 port.
 
 - Abstract generic N64 lessons to `TheMrIron2/n64ps3`, a N64 library for PS3. Low priority and can be done once behaviour is settled.
-- Use `TheMrIron2/sf64-psp` and `harbourmasters/starship` as references whenever you need to adapt N64 behaviour.
+- Use `TheMrIron2/sf64-psp` and `harbourmasters/starship` as references whenever you need to adapt N64 behaviour. Starship is the gospel for accuracy, but adapt its lessons rather than techniques verbatim, as they are designed for modern hardware.
 - Become a 60FPS HD port of Star Fox 64 to PS3. (Matrix interpolation for 60FPS)
 
 Write in native RSX GCM for graphics where possible; porting GL code initially via RSXGL is acceptable if it expedites the overall progress.

@@ -219,7 +219,9 @@ int main(void)
     assert(sf64_team_running_build(&task, s_team_memory, sizeof(s_team_memory),
                                     sf64_title_segment_data, sf64_title_segment_size,
                                     opening.eye, opening.at, opening.up, opening.team_z_offset,
-                                    opening.passage_offset, 1.0f, opening.team_frames,
+                                    opening.passage_offset, 1.0f,
+                                    opening.team_light_dir, opening.team_ambient,
+                                    opening.team_frames,
                                     opening.team_name_visible, opening.team_name_index) == 0);
     count = 0;
     {
